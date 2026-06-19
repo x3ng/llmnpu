@@ -1,10 +1,8 @@
 <testsuites name="results">
   <testsuite name="all" package="all">
-    <property name="random_seed" value="1781876476" />
-    <testcase name="test_gemm_basic" classname="test_gemm" file="/home/xen/Project/llmeda/npu/sim/cocotb/test_gemm.py" lineno="169" time="0.03981518745422363" sim_time_ns="68.007" ratio_time="1708.0668043617552" />
-    <testcase name="test_gemm_zero_a" classname="test_gemm" file="/home/xen/Project/llmeda/npu/sim/cocotb/test_gemm.py" lineno="203" time="0.016853809356689453" sim_time_ns="68.00699999999999" ratio_time="4035.11150273023" />
-    <testcase name="test_gemm_zero_b" classname="test_gemm" file="/home/xen/Project/llmeda/npu/sim/cocotb/test_gemm.py" lineno="220" time="0.007971048355102539" sim_time_ns="68.007" ratio_time="8531.751028265488" />
-    <testcase name="test_gemm_k2" classname="test_gemm" file="/home/xen/Project/llmeda/npu/sim/cocotb/test_gemm.py" lineno="237" time="0.03132748603820801" sim_time_ns="72.00799999999998" ratio_time="2298.5566065587486" />
-    <testcase name="test_gemm_idle_after_done" classname="test_gemm" file="/home/xen/Project/llmeda/npu/sim/cocotb/test_gemm.py" lineno="289" time="0.06527352333068848" sim_time_ns="168.014" ratio_time="2573.999248497865" />
+    <property name="random_seed" value="1781891948" />
+    <testcase name="test_e2e_gemm_pass" classname="test_e2e_gemm" file="/home/xen/Project/llmeda/npu/sim/cocotb/test_e2e_gemm.py" lineno="191" time="1548.9073040485382" sim_time_ns="24921400.0" ratio_time="16089.665233587817">
+      <failure error_type="SimFailure" error_msg="Simulator shut down prematurely" />
+    </testcase>
   </testsuite>
 </testsuites>

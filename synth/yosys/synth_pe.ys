@@ -1,0 +1,8 @@
+verilog_defaults -add -Irtl/include
+read_verilog -sv -Irtl/include rtl/include/npu_defines.svh
+read_verilog -sv -Irtl/include rtl/npu/gemm/pe.sv
+hierarchy -top pe
+proc
+opt
+stat -width
+stat -tech cmos

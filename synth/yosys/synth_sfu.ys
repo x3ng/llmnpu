@@ -1,0 +1,11 @@
+verilog_defaults -add -Irtl/include
+read_verilog -sv -Irtl/include rtl/include/npu_defines.svh
+read_verilog -sv -Irtl/include rtl/include/isa_defines.svh
+read_verilog -sv -Irtl/include /tmp/npu_synth/lut_engine.sv
+read_verilog -sv -Irtl/include rtl/npu/sfu/quant_dequant.sv
+read_verilog -sv -Irtl/include rtl/npu/sfu/sfu_top.sv
+hierarchy -top sfu_top
+proc
+opt
+stat -width
+stat -tech cmos

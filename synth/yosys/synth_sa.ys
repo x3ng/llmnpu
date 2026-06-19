@@ -1,0 +1,9 @@
+verilog_defaults -add -Irtl/include
+read_verilog -sv -Irtl/include rtl/include/npu_defines.svh
+read_verilog -sv -Irtl/include rtl/npu/gemm/pe.sv
+read_verilog -sv -Irtl/include rtl/npu/gemm/systolic_array.sv
+hierarchy -top systolic_array
+proc
+opt
+stat -width
+stat -tech cmos

@@ -1,0 +1,137 @@
+# ============================================================
+# NPU Yosys Synthesis — Per-Module Area Estimates
+# Yosys 0.62 limitation: 'parameter string' not supported
+# Workaround: use temp copy without 'string' type keyword
+# ============================================================
+
+verilog_defaults -add -Irtl/include
+
+# --- Headers ---
+read_verilog -sv -Irtl/include rtl/include/npu_defines.svh
+read_verilog -sv -Irtl/include rtl/include/isa_defines.svh
+
+# --- Leaf modules (no sub-dependencies) ---
+read_verilog -sv -Irtl/include rtl/npu/gemm/pe.sv
+read_verilog -sv -Irtl/include rtl/npu/valu/valu_lane.sv
+read_verilog -sv -Irtl/include rtl/npu/valu/vregfile.sv
+read_verilog -sv -Irtl/include /tmp/npu_synth/lut_engine.sv
+read_verilog -sv -Irtl/include rtl/npu/sfu/quant_dequant.sv
+read_verilog -sv -Irtl/include rtl/npu/dma/npu_dma.sv
+read_verilog -sv -Irtl/include rtl/npu/memory/sram_bank.sv
+read_verilog -sv -Irtl/include rtl/npu/pingpong.sv
+read_verilog -sv -Irtl/include rtl/npu/csr.sv
+read_verilog -sv -Irtl/include rtl/npu/if_id/ifetch.sv
+read_verilog -sv -Irtl/include rtl/npu/if_id/idecode.sv
+read_verilog -sv -Irtl/include rtl/npu/if_id/dispatch.sv
+
+# --- Mid-level modules ---
+read_verilog -sv -Irtl/include rtl/npu/gemm/gemm_controller.sv
+read_verilog -sv -Irtl/include rtl/npu/gemm/systolic_array.sv
+read_verilog -sv -Irtl/include rtl/npu/valu/valu_top.sv
+read_verilog -sv -Irtl/include rtl/npu/sfu/sfu_top.sv
+read_verilog -sv -Irtl/include rtl/npu/memory/crossbar.sv
+read_verilog -sv -Irtl/include rtl/npu/if_id/if_id_top.sv
+read_verilog -sv -Irtl/include rtl/interconnect/axi_dma_wrapper.sv
+
+# --- Top ---
+read_verilog -sv -Irtl/include rtl/npu/top.sv
+
+# ============================================================
+# Per-module synthesis and stats
+# ============================================================
+
+# 1. PE (single processing element)
+hierarchy -top pe
+proc
+stat -width
+stat -tech cmos
+
+# 2. Single SRAM bank
+hierarchy -top sram_bank
+proc
+stat -width
+stat -tech cmos
+
+# 3. VALU lane
+hierarchy -top valu_lane
+proc
+stat -width
+stat -tech cmos
+
+# 4. vregfile
+hierarchy -top vregfile
+proc
+stat -width
+stat -tech cmos
+
+# 5. LUT engine
+hierarchy -top lut_engine
+proc
+stat -width
+stat -tech cmos
+
+# 6. quant_dequant
+hierarchy -top quant_dequant
+proc
+stat -width
+stat -tech cmos
+
+# 7. pingpong buffer
+hierarchy -top pingpong
+proc
+stat -width
+stat -tech cmos
+
+# 8. gemm_controller
+hierarchy -top gemm_controller
+proc
+stat -width
+stat -tech cmos
+
+# 9. systolic_array (16x16 PEs) — largest block
+hierarchy -top systolic_array
+proc
+stat -width
+stat -tech cmos
+
+# 10. valu_top
+hierarchy -top valu_top
+proc
+stat -width
+stat -tech cmos
+
+# 11. sfu_top
+hierarchy -top sfu_top
+proc
+stat -width
+stat -tech cmos
+
+# 12. crossbar (4 × SRAM)
+hierarchy -top crossbar
+proc
+stat -width
+stat -tech cmos
+
+# 13. if_id_top
+hierarchy -top if_id_top
+proc
+stat -width
+stat -tech cmos
+
+# 14. npu_dma + axi_dma_wrapper
+hierarchy -top npu_dma
+proc
+stat -width
+stat -tech cmos
+
+# 15. csr
+hierarchy -top csr
+proc
+stat -width
+stat -tech cmos
+
+# 16. Top-level aggregation
+hierarchy -top npu_top
+proc
+stat -width
+stat -tech cmos

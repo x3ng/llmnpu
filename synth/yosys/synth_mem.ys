@@ -1,0 +1,9 @@
+verilog_defaults -add -Irtl/include
+read_verilog -sv -Irtl/include rtl/include/npu_defines.svh
+read_verilog -sv -Irtl/include rtl/npu/memory/sram_bank.sv
+read_verilog -sv -Irtl/include rtl/npu/memory/crossbar.sv
+hierarchy -top crossbar
+proc
+opt
+stat -width
+stat -tech cmos

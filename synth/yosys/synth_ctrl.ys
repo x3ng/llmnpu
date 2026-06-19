@@ -1,0 +1,14 @@
+verilog_defaults -add -Irtl/include
+read_verilog -sv -Irtl/include rtl/include/npu_defines.svh
+read_verilog -sv -Irtl/include rtl/include/isa_defines.svh
+read_verilog -sv -Irtl/include rtl/npu/if_id/ifetch.sv
+read_verilog -sv -Irtl/include rtl/npu/if_id/idecode.sv
+read_verilog -sv -Irtl/include rtl/npu/if_id/dispatch.sv
+read_verilog -sv -Irtl/include rtl/npu/if_id/if_id_top.sv
+read_verilog -sv -Irtl/include rtl/npu/csr.sv
+read_verilog -sv -Irtl/include rtl/npu/pingpong.sv
+hierarchy -top if_id_top
+proc
+opt
+stat -width
+stat -tech cmos
