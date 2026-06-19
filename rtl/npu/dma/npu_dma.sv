@@ -2,8 +2,7 @@
 // npu_dma.sv — NPU DMA Controller
 //
 // Coordinates 1D/2D data transfers between external memory and
-// NPU SRAM.  Drives the behavioral axi_dma_wrapper and manages
-// ping-pong buffer ping-pong handshake.
+// NPU SRAM.  Wraps axi_dma_wrapper (proper AXI DMA engine).
 //
 // FSM: IDLE → XFER → DONE
 //
@@ -17,7 +16,9 @@
 `include "npu_defines.svh"
 `include "isa_defines.svh"
 
-module npu_dma (
+module npu_dma #(
+    parameter bit STANDALONE = 1
+) (
     input  logic        clk,
     input  logic        rst_n,
 
@@ -33,8 +34,36 @@ module npu_dma (
     output logic        done,
 
     // Ping-pong buffer coordination
-    output logic        pp_bank,         // current ping-pong bank (toggles)
-    output logic        pp_ready,        // buffer ready for consumer
+    output logic        pp_bank,
+    output logic        pp_ready,
+
+    // ---- AXI4 Master Interface (passthrough from wrapper) ----
+    // Read address
+    output logic [31:0] m_axi_araddr,
+    output logic [7:0]  m_axi_arlen,
+    output logic        m_axi_arvalid,
+    input  logic        m_axi_arready,
+    // Read data
+    input  logic [63:0] m_axi_rdata,
+    input  logic [1:0]  m_axi_rresp,
+    input  logic        m_axi_rlast,
+    input  logic        m_axi_rvalid,
+    output logic        m_axi_rready,
+    // Write address
+    output logic [31:0] m_axi_awaddr,
+    output logic [7:0]  m_axi_awlen,
+    output logic        m_axi_awvalid,
+    input  logic        m_axi_awready,
+    // Write data
+    output logic [63:0] m_axi_wdata,
+    output logic [7:0]  m_axi_wstrb,
+    output logic        m_axi_wlast,
+    output logic        m_axi_wvalid,
+    input  logic        m_axi_wready,
+    // Write response
+    input  logic [1:0]  m_axi_bresp,
+    input  logic        m_axi_bvalid,
+    output logic        m_axi_bready,
 
     // --------------------------------------------------------
     // Simulation debug: direct SRAM access
@@ -45,7 +74,7 @@ module npu_dma (
     input  logic [63:0] sim_sram_wdata,
     output logic [63:0] sim_sram_rdata,
 
-    // Simulation debug: direct ExtMem access (routed to wrapper)
+    // Simulation debug: direct ExtMem access (routed to wrapper AXI RAM)
     input  logic        sim_ext_en,
     input  logic        sim_ext_we,
     input  logic [31:0] sim_ext_addr,
@@ -91,54 +120,100 @@ module npu_dma (
     assign sim_sram_rdata = sram_rdata_reg;
 
     // --------------------------------------------------------
-    // Wrapper instantiation
+    // Wrapper signals
     // --------------------------------------------------------
     logic        wrapper_start;
     logic [1:0]  wrapper_mode;
     logic [31:0] wrapper_ext_addr;
-    logic [15:0] wrapper_sram_addr;
     logic [15:0] wrapper_length;
     logic        wrapper_done;
-    logic [63:0] wrapper_rd_data;
-    logic [63:0] wrapper_wr_data;
     logic        wrapper_xfer_active;
 
-    axi_dma_wrapper wrapper (
-        .clk         (clk),
-        .rst_n       (rst_n),
-        .start       (wrapper_start),
-        .mode        (wrapper_mode),
-        .ext_addr    (wrapper_ext_addr),
-        .sram_addr   (wrapper_sram_addr),
-        .length      (wrapper_length),
-        .done        (wrapper_done),
-        .rd_data     (wrapper_rd_data),
-        .wr_data     (wrapper_wr_data),
-        .xfer_active (wrapper_xfer_active),
-        .sim_en      (sim_ext_en),
-        .sim_we      (sim_ext_we),
-        .sim_addr    (sim_ext_addr),
-        .sim_wdata   (sim_ext_wdata),
-        .sim_rdata   (sim_ext_rdata)
-    );
+    logic [63:0] wrapper_rd_data;
+    logic        wrapper_rd_valid;
+
+    logic [63:0] wrapper_wr_data;
+    logic        wrapper_wr_ready;
 
     // --------------------------------------------------------
     // Command registers (captured on start)
     // --------------------------------------------------------
-    reg [1:0]  r_mode;          // decoded opcode → wrapper mode
+    reg [1:0]  r_mode;
     reg [31:0] r_ext_addr;
     reg [15:0] r_sram_addr;
     reg [15:0] r_length;
-    reg [15:0] xfer_cnt;        // bytes transferred in current DMA op
+    reg [15:0] xfer_cnt;
+    reg [15:0] total_words;     // length / 8
 
-    // Ping-pong bank (toggles after each transfer)
+    // wr_data driven combinationally from sram — avoids NBA race
+    // with wrapper's capture cycle.
+    assign wrapper_wr_data[7:0]   = (r_mode == 2'b10) ? sram[r_sram_addr + xfer_cnt  ] : 8'd0;
+    assign wrapper_wr_data[15:8]  = (r_mode == 2'b10) ? sram[r_sram_addr + xfer_cnt+1] : 8'd0;
+    assign wrapper_wr_data[23:16] = (r_mode == 2'b10) ? sram[r_sram_addr + xfer_cnt+2] : 8'd0;
+    assign wrapper_wr_data[31:24] = (r_mode == 2'b10) ? sram[r_sram_addr + xfer_cnt+3] : 8'd0;
+    assign wrapper_wr_data[39:32] = (r_mode == 2'b10) ? sram[r_sram_addr + xfer_cnt+4] : 8'd0;
+    assign wrapper_wr_data[47:40] = (r_mode == 2'b10) ? sram[r_sram_addr + xfer_cnt+5] : 8'd0;
+    assign wrapper_wr_data[55:48] = (r_mode == 2'b10) ? sram[r_sram_addr + xfer_cnt+6] : 8'd0;
+    assign wrapper_wr_data[63:56] = (r_mode == 2'b10) ? sram[r_sram_addr + xfer_cnt+7] : 8'd0;
+
+    // --------------------------------------------------------
+    // Wrapper instantiation — proper AXI DMA
+    // --------------------------------------------------------
+    axi_dma_wrapper #(
+        .STANDALONE (STANDALONE)
+    ) wrapper (
+        .clk,
+        .rst_n,
+        .start         (wrapper_start),
+        .mode          (wrapper_mode),
+        .ext_addr      (wrapper_ext_addr),
+        .length        (wrapper_length),
+        .done          (wrapper_done),
+        .xfer_active   (wrapper_xfer_active),
+        .rd_data       (wrapper_rd_data),
+        .rd_valid      (wrapper_rd_valid),
+        .wr_data       (wrapper_wr_data),
+        .wr_ready      (wrapper_wr_ready),
+
+        // AXI passthrough
+        .m_axi_araddr  (m_axi_araddr),
+        .m_axi_arlen   (m_axi_arlen),
+        .m_axi_arvalid (m_axi_arvalid),
+        .m_axi_arready (m_axi_arready),
+        .m_axi_rdata   (m_axi_rdata),
+        .m_axi_rresp   (m_axi_rresp),
+        .m_axi_rlast   (m_axi_rlast),
+        .m_axi_rvalid  (m_axi_rvalid),
+        .m_axi_rready  (m_axi_rready),
+        .m_axi_awaddr  (m_axi_awaddr),
+        .m_axi_awlen   (m_axi_awlen),
+        .m_axi_awvalid (m_axi_awvalid),
+        .m_axi_awready (m_axi_awready),
+        .m_axi_wdata   (m_axi_wdata),
+        .m_axi_wstrb   (m_axi_wstrb),
+        .m_axi_wlast   (m_axi_wlast),
+        .m_axi_wvalid  (m_axi_wvalid),
+        .m_axi_wready  (m_axi_wready),
+        .m_axi_bresp   (m_axi_bresp),
+        .m_axi_bvalid  (m_axi_bvalid),
+        .m_axi_bready  (m_axi_bready),
+
+        // Debug: sim_ext_* routed to wrapper's sim_ram_*
+        .sim_ram_en    (sim_ext_en),
+        .sim_ram_we    (sim_ext_we),
+        .sim_ram_addr  (sim_ext_addr),
+        .sim_ram_wdata (sim_ext_wdata),
+        .sim_ram_rdata (sim_ext_rdata)
+    );
+
+    // Ping-pong bank
     reg pp_bank_reg;
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) pp_bank_reg <= 1'b0;
-        else if (done && busy)  pp_bank_reg <= ~pp_bank_reg;  // flip at completion
+        else if (done && busy)  pp_bank_reg <= ~pp_bank_reg;
     end
     assign pp_bank  = pp_bank_reg;
-    assign pp_ready = ~busy;    // buffer ready when DMA is idle
+    assign pp_ready = ~busy;
 
     // --------------------------------------------------------
     // DMA FSM — IDLE → XFER → DONE
@@ -157,7 +232,7 @@ module npu_dma (
             done          <= 1'b0;
             wrapper_start <= 1'b0;
             xfer_cnt      <= 16'd0;
-            wrapper_wr_data <= 64'd0;
+            total_words   <= 16'd0;
         end else begin
             state <= next;
 
@@ -169,13 +244,14 @@ module npu_dma (
                         r_ext_addr  <= ext_addr;
                         r_sram_addr <= sram_addr;
                         r_length    <= length;
+                        total_words <= length[15:3];  // bytes / 8
                         xfer_cnt    <= 16'd0;
 
                         // Decode opcode → wrapper mode
                         case (opcode)
                             `OP_DMA_LD:  r_mode <= 2'b01;
                             `OP_DMA_ST:  r_mode <= 2'b10;
-                            `OP_DMA_2D:  r_mode <= 2'b01;  // treat as load for now
+                            `OP_DMA_2D:  r_mode <= 2'b01;
                             default:     r_mode <= 2'b00;
                         endcase
 
@@ -183,7 +259,6 @@ module npu_dma (
                         wrapper_start     <= 1'b1;
                         wrapper_mode      <= (opcode == `OP_DMA_ST) ? 2'b10 : 2'b01;
                         wrapper_ext_addr  <= ext_addr;
-                        wrapper_sram_addr <= sram_addr;
                         wrapper_length    <= length;
                     end
                 end
@@ -191,12 +266,10 @@ module npu_dma (
                 S_XFER: begin
                     wrapper_start <= 1'b0;
 
-                    // Data path
                     if (r_mode == 2'b01) begin
                         // LOAD: capture wrapper rd_data into SRAM
-                        // xfer_cnt advances only when data is valid (1 cycle
-                        // after wrapper starts its XFER, due to NBA pipeline)
-                        if (wrapper_xfer_active) begin
+                        // when rd_valid is asserted
+                        if (wrapper_rd_valid) begin
                             sram[r_sram_addr + xfer_cnt  ] <= wrapper_rd_data[7:0];
                             sram[r_sram_addr + xfer_cnt+1] <= wrapper_rd_data[15:8];
                             sram[r_sram_addr + xfer_cnt+2] <= wrapper_rd_data[23:16];
@@ -205,21 +278,14 @@ module npu_dma (
                             sram[r_sram_addr + xfer_cnt+5] <= wrapper_rd_data[47:40];
                             sram[r_sram_addr + xfer_cnt+6] <= wrapper_rd_data[55:48];
                             sram[r_sram_addr + xfer_cnt+7] <= wrapper_rd_data[63:56];
-                            xfer_cnt <= xfer_cnt + 8;
+                            xfer_cnt <= xfer_cnt + 16'd8;
                         end
                     end else if (r_mode == 2'b10) begin
-                        // STORE: drive SRAM data into wrapper wr_data
-                        // xfer_cnt advances every cycle; wrapper consumes
-                        // the presented data one cycle later
-                        wrapper_wr_data[7:0]   <= sram[r_sram_addr + xfer_cnt  ];
-                        wrapper_wr_data[15:8]  <= sram[r_sram_addr + xfer_cnt+1];
-                        wrapper_wr_data[23:16] <= sram[r_sram_addr + xfer_cnt+2];
-                        wrapper_wr_data[31:24] <= sram[r_sram_addr + xfer_cnt+3];
-                        wrapper_wr_data[39:32] <= sram[r_sram_addr + xfer_cnt+4];
-                        wrapper_wr_data[47:40] <= sram[r_sram_addr + xfer_cnt+5];
-                        wrapper_wr_data[55:48] <= sram[r_sram_addr + xfer_cnt+6];
-                        wrapper_wr_data[63:56] <= sram[r_sram_addr + xfer_cnt+7];
-                        xfer_cnt <= xfer_cnt + 8;
+                        // STORE: wr_data is driven combinationally (wire above).
+                        // Advance xfer_cnt when wrapper accepts current word.
+                        if (wrapper_wr_ready) begin
+                            xfer_cnt <= xfer_cnt + 16'd8;
+                        end
                     end
                 end
 

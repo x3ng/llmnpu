@@ -2,7 +2,7 @@
 
 Validates the end-to-end DMA data path through the full SoC:
   1. Firmware on PicoRV32 exercises CSR MMIO register paths and ExtMem
-  2. Cocotb verifies DMA internal memories (ext_mem, SRAM) via hierarchy
+  2. Cocotb verifies DMA internal memories (u_dram.mem, SRAM) via hierarchy
   3. Cocotb manually exercises the DMA data movement path
      (ext_mem → SRAM → ext_mem, simulating DMA LOAD then STORE)
 
@@ -19,8 +19,8 @@ from cocotb.triggers import RisingEdge, Timer, ClockCycles
 
 NUM_WORDS = 16                # number of 64-bit words in test pattern
 SRAM_BASE = 0x0000            # A-SRAM base (NPU-internal 16-bit addr)
-EXT_SRC   = 0x0100            # source offset in DMA ext_mem
-EXT_DST   = 0x0200            # destination offset in DMA ext_mem
+EXT_SRC_WORD = 0x40           # word addr for byte offset 0x0100 (0x100/4)
+EXT_DST_WORD = 0x80           # word addr for byte offset 0x0200 (0x200/4)
 BYTES     = NUM_WORDS * 8     # total bytes: 128
 
 TIMEOUT_CYCLES = 2000000      # max cycles to wait for firmware UART
@@ -28,9 +28,9 @@ TIMEOUT_CYCLES = 2000000      # max cycles to wait for firmware UART
 
 # ── Helpers: DMA memory access via hierarchy ────────────────────────────────
 
-def _ext_mem(dut):
-    """Return DMA wrapper internal ext_mem byte array (64 KB)."""
-    return dut.u_npu.u_dma.wrapper.ext_mem
+def _ext_word_mem(dut):
+    """Return ext_mem_model's 32-bit word array (u_dram.mem)."""
+    return dut.u_dram.mem
 
 
 def _sram(dut):
@@ -38,18 +38,19 @@ def _sram(dut):
     return dut.u_npu.u_dma.sram
 
 
-def _ext_write64(dut, byte_addr, data):
-    """Write one 64-bit word to DMA ext_mem at byte_addr."""
-    for b in range(8):
-        _ext_mem(dut)[byte_addr + b].value = (data >> (b * 8)) & 0xFF
+def _ext_write64(dut, word_addr, data):
+    """Write one 64-bit value to ext_mem at 32-bit word_addr.
+    Stores as two consecutive 32-bit words (little-endian)."""
+    _ext_word_mem(dut)[word_addr].value     = data & 0xFFFFFFFF
+    _ext_word_mem(dut)[word_addr + 1].value = (data >> 32) & 0xFFFFFFFF
 
 
-def _ext_read64(dut, byte_addr):
-    """Read one 64-bit word from DMA ext_mem at byte_addr.  Returns int."""
-    val = 0
-    for b in range(8):
-        val |= int(_ext_mem(dut)[byte_addr + b].value) << (b * 8)
-    return val
+def _ext_read64(dut, word_addr):
+    """Read one 64-bit value from ext_mem at 32-bit word_addr.
+    Returns int from two consecutive 32-bit words (little-endian)."""
+    lo = int(_ext_word_mem(dut)[word_addr].value)
+    hi = int(_ext_word_mem(dut)[word_addr + 1].value)
+    return (hi << 32) | lo
 
 
 def _sram_write64(dut, byte_addr, data):
@@ -106,12 +107,12 @@ async def run_dma_datapath_test(dut):
     """Exercise the DMA memory data path via hierarchical access.
 
     Sequence:
-      1. Write known pattern to DMA ext_mem[EXT_SRC]
-      2. Read back DMA ext_mem and verify
-      3. Copy DMA ext_mem → DMA SRAM (simulate LOAD)
+      1. Write known pattern to ext_mem_model (u_dram.mem)
+      2. Read back ext_mem and verify
+      3. Copy ext_mem → DMA SRAM (simulate LOAD)
       4. Read back DMA SRAM and verify
-      5. Copy DMA SRAM → DMA ext_mem[EXT_DST] (simulate STORE)
-      6. Read back DMA ext_mem[EXT_DST] and compare with source
+      5. Copy DMA SRAM → ext_mem[EXT_DST] (simulate STORE)
+      6. Read back ext_mem[EXT_DST] and compare with source
 
     Returns (passed, errors_list).
     """
@@ -119,48 +120,48 @@ async def run_dma_datapath_test(dut):
     errors = []
 
     # ── Build 64-bit test pattern ───────────────────────────────────────
-    # Each word: upper 32 bits = 0xDMA0iii, lower 32 bits = 0x0000iiii
     pattern = []
     for i in range(NUM_WORDS):
         lo = 0x00000000 + i
-        hi = 0xDMA00000 + i
+        hi = 0xDA000000 + i
         val = (hi << 32) | lo
         pattern.append(val)
 
     log.info("=== DMA Data-Path Test (cocotb hierarchy) ===")
 
-    # ── Step 1: Write pattern to DMA ext_mem ────────────────────────────
-    log.info(f"Writing {NUM_WORDS} x 64-bit words to DMA ext_mem[0x{EXT_SRC:04X}]")
+    # ── Step 1: Write pattern to ext_mem_model (u_dram.mem) ─────────────
+    log.info(f"Writing {NUM_WORDS} x 64-bit words to ext_mem "
+             f"[word 0x{EXT_SRC_WORD:04X}]")
     for i, val in enumerate(pattern):
-        byte_addr = EXT_SRC + i * 8
-        _ext_write64(dut, byte_addr, val)
+        word_addr = EXT_SRC_WORD + i * 2  # 2 words per 64-bit value
+        _ext_write64(dut, word_addr, val)
 
-    # ── Step 2: Read back DMA ext_mem and verify ────────────────────────
-    log.info("Reading back DMA ext_mem source region")
+    # ── Step 2: Read back ext_mem and verify ────────────────────────────
+    log.info("Reading back ext_mem source region")
     for i, expected in enumerate(pattern):
-        byte_addr = EXT_SRC + i * 8
-        actual = _ext_read64(dut, byte_addr)
+        word_addr = EXT_SRC_WORD + i * 2
+        actual = _ext_read64(dut, word_addr)
         if actual != expected:
-            msg = (f"DMA ext_mem source verify: word {i}: "
+            msg = (f"ext_mem source verify: word {i}: "
                    f"expected 0x{expected:016X}, got 0x{actual:016X}")
             log.error(msg)
             errors.append(msg)
         else:
-            log.debug(f"  ext_mem[0x{byte_addr:04X}] = 0x{actual:016X} OK")
+            log.debug(f"  ext_mem[word 0x{word_addr:04X}] = 0x{actual:016X} OK")
 
     if errors:
-        log.error(f"DMA ext_mem source verify: {len(errors)} mismatch(es)")
-        return False, errors[:]  # abort — source data is wrong
+        log.error(f"ext_mem source verify: {len(errors)} mismatch(es)")
+        return False, errors[:]
 
-    log.info("DMA ext_mem source region verified OK")
+    log.info("ext_mem source region verified OK")
 
-    # ── Step 3: Copy DMA ext_mem → DMA SRAM (simulate LOAD) ────────────
-    log.info(f"Copying DMA ext_mem → DMA SRAM[0x{SRAM_BASE:04X}] "
+    # ── Step 3: Copy ext_mem → DMA SRAM (simulate LOAD) ────────────────
+    log.info(f"Copying ext_mem → DMA SRAM[0x{SRAM_BASE:04X}] "
              f"(simulating DMA LOAD, {BYTES} bytes)")
     for i in range(NUM_WORDS):
-        ext_byte = EXT_SRC + i * 8
+        word_addr = EXT_SRC_WORD + i * 2
         sram_byte = SRAM_BASE + i * 8
-        val = _ext_read64(dut, ext_byte)
+        val = _ext_read64(dut, word_addr)
         _sram_write64(dut, sram_byte, val)
 
     # ── Step 4: Read back DMA SRAM and verify ───────────────────────────
@@ -181,32 +182,32 @@ async def run_dma_datapath_test(dut):
         return False, errors
     log.info("DMA SRAM verified OK (LOAD path simulated)")
 
-    # ── Step 5: Copy DMA SRAM → DMA ext_mem[EXT_DST] (simulate STORE) ──
-    log.info(f"Copying DMA SRAM → DMA ext_mem[0x{EXT_DST:04X}] "
+    # ── Step 5: Copy DMA SRAM → ext_mem[EXT_DST] (simulate STORE) ──────
+    log.info(f"Copying DMA SRAM → ext_mem[word 0x{EXT_DST_WORD:04X}] "
              f"(simulating DMA STORE, {BYTES} bytes)")
     for i in range(NUM_WORDS):
         sram_byte = SRAM_BASE + i * 8
-        ext_byte = EXT_DST + i * 8
+        word_addr = EXT_DST_WORD + i * 2
         val = _sram_read64(dut, sram_byte)
-        _ext_write64(dut, ext_byte, val)
+        _ext_write64(dut, word_addr, val)
 
-    # ── Step 6: Read back DMA ext_mem[EXT_DST] and compare ─────────────
-    log.info(f"Reading back DMA ext_mem destination region [0x{EXT_DST:04X}]")
+    # ── Step 6: Read back ext_mem[EXT_DST] and compare ──────────────────
+    log.info(f"Reading back ext_mem destination region [word 0x{EXT_DST_WORD:04X}]")
     dst_errors = 0
     for i, expected in enumerate(pattern):
-        byte_addr = EXT_DST + i * 8
-        actual = _ext_read64(dut, byte_addr)
+        word_addr = EXT_DST_WORD + i * 2
+        actual = _ext_read64(dut, word_addr)
         if actual != expected:
-            msg = (f"DMA ext_mem dest verify: word {i}: "
+            msg = (f"ext_mem dest verify: word {i}: "
                    f"expected 0x{expected:016X}, got 0x{actual:016X}")
             log.error(msg)
             errors.append(msg)
             dst_errors += 1
 
     if dst_errors:
-        log.error(f"DMA ext_mem dest verify: {dst_errors} mismatch(es)")
+        log.error(f"ext_mem dest verify: {dst_errors} mismatch(es)")
         return False, errors
-    log.info("DMA ext_mem destination region verified OK (STORE path simulated)")
+    log.info("ext_mem destination region verified OK (STORE path simulated)")
 
     return True, []
 
@@ -227,13 +228,13 @@ async def test_e2e_dma(dut):
     dut.rst_n.value = 0
     await ClockCycles(dut.clk, 5)
 
-    # ── Pre-load DMA ext_mem with zeroes (clean start) ──────────────────
-    log.info("Pre-loading DMA ext_mem with zeroes")
+    # ── Pre-load ext_mem with zeroes (clean start) ──────────────────────
+    log.info("Pre-loading ext_mem with zeroes")
     try:
-        for i in range(0, 0x1000, 8):
+        for i in range(0, 0x400, 2):  # 2 words per 64-bit, 0x400 words = 4KB
             _ext_write64(dut, i, 0)
     except AttributeError as e:
-        msg = f"Cannot access DMA ext_mem hierarchy: {e}"
+        msg = f"Cannot access ext_mem hierarchy (u_dram.mem): {e}"
         log.error(msg)
         all_errors.append(msg)
 
@@ -275,7 +276,7 @@ async def test_e2e_dma(dut):
 
     # ── Run DMA data-path test via hierarchy ─────────────────────────────
     dma_pass = False
-    if not all_errors:  # only if hierarchy is accessible
+    if not all_errors:
         dma_pass, dma_errors = await run_dma_datapath_test(dut)
         all_errors.extend(dma_errors)
     else:

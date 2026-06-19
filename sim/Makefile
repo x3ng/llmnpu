@@ -12,7 +12,7 @@ EXTRA_ARGS =
 
 include $(shell cocotb-config --makefiles)/Makefile.sim
 
-.PHONY: test_pe test_gemm test_valu test_sfu test_dma test_memory test_if_id test_npu_top
+.PHONY: test_pe test_gemm test_valu test_sfu test_dma test_dma_load test_memory test_if_id test_npu_top
 .PHONY: test_e2e test_e2e_csr test_e2e_boot test_e2e_gemm test_e2e_dma
 .PHONY: test_all clean
 
@@ -55,7 +55,15 @@ test_dma:
 	@rm -rf $(SIM_BUILD)
 	PYTHONPATH=$(PWD)/cocotb:$$PYTHONPATH \
 	MODULE=test_dma TOPLEVEL=npu_dma \
-	VERILOG_SOURCES="$(REPO_ROOT)/rtl/interconnect/axi_dma_wrapper.sv $(REPO_ROOT)/rtl/npu/dma/npu_dma.sv" \
+	VERILOG_SOURCES="$(REPO_ROOT)/ref/verilog-axi/rtl/axi_dma_rd.v $(REPO_ROOT)/rtl/interconnect/axi_dma_wrapper.sv $(REPO_ROOT)/rtl/npu/dma/npu_dma.sv" \
+	$(MAKE)
+
+test_dma_load: SIM_BUILD = sim_build_dma_load
+test_dma_load:
+	@rm -rf $(SIM_BUILD)
+	PYTHONPATH=$(PWD)/cocotb:$$PYTHONPATH \
+	MODULE=test_dma_load TOPLEVEL=npu_dma \
+	VERILOG_SOURCES="$(REPO_ROOT)/ref/verilog-axi/rtl/axi_dma_rd.v $(REPO_ROOT)/rtl/interconnect/axi_dma_wrapper.sv $(REPO_ROOT)/rtl/npu/dma/npu_dma.sv" \
 	$(MAKE)
 
 test_memory: SIM_BUILD = sim_build_memory
@@ -93,6 +101,7 @@ test_npu_top:
 		$(REPO_ROOT)/rtl/npu/sfu/lut_engine.sv \
 		$(REPO_ROOT)/rtl/npu/sfu/quant_dequant.sv \
 		$(REPO_ROOT)/rtl/npu/sfu/sfu_top.sv \
+		$(REPO_ROOT)/ref/verilog-axi/rtl/axi_dma_rd.v \
 		$(REPO_ROOT)/rtl/interconnect/axi_dma_wrapper.sv \
 		$(REPO_ROOT)/rtl/npu/dma/npu_dma.sv \
 		$(REPO_ROOT)/rtl/npu/memory/sram_bank.sv \
@@ -131,7 +140,8 @@ test_e2e_csr:
 		$(REPO_ROOT)/rtl/cpu/picorv32_adapted.v \
 		$(REPO_ROOT)/rtl/cpu/picorv32_wrapper.sv \
 		$(REPO_ROOT)/rtl/interconnect/axi_crossbar_soc.sv \
-		$(REPO_ROOT)/rtl/interconnect/axi_dma_wrapper.sv \
+		$(REPO_ROOT)/ref/verilog-axi/rtl/axi_dma_rd.v \
+			$(REPO_ROOT)/rtl/interconnect/axi_dma_wrapper.sv \
 		$(REPO_ROOT)/rtl/npu/top.sv \
 		$(REPO_ROOT)/rtl/npu/csr.sv \
 		$(REPO_ROOT)/rtl/npu/pingpong.sv \
@@ -179,7 +189,8 @@ test_e2e_boot:
 		$(REPO_ROOT)/rtl/cpu/picorv32_adapted.v \
 		$(REPO_ROOT)/rtl/cpu/picorv32_wrapper.sv \
 		$(REPO_ROOT)/rtl/interconnect/axi_crossbar_soc.sv \
-		$(REPO_ROOT)/rtl/interconnect/axi_dma_wrapper.sv \
+		$(REPO_ROOT)/ref/verilog-axi/rtl/axi_dma_rd.v \
+			$(REPO_ROOT)/rtl/interconnect/axi_dma_wrapper.sv \
 		$(REPO_ROOT)/rtl/npu/top.sv \
 		$(REPO_ROOT)/rtl/npu/csr.sv \
 		$(REPO_ROOT)/rtl/npu/pingpong.sv \
@@ -208,8 +219,9 @@ test_e2e:
 	@rm -rf $(SIM_BUILD)
 	@echo "=== Building E2E firmware ==="
 	@mkdir -p $(REPO_ROOT)/build
+	@python3 $(REPO_ROOT)/tools/codegen/generate_golden.py --header > $(REPO_ROOT)/build/golden_gemm.h
 	riscv32-none-elf-gcc -march=rv32im -mabi=ilp32 -nostdlib -ffreestanding -O2 \
-		-I$(REPO_ROOT)/sw/driver -I$(REPO_ROOT)/sw/runtime \
+		-I$(REPO_ROOT)/build -I$(REPO_ROOT)/sw/driver -I$(REPO_ROOT)/sw/runtime \
 		-c $(PWD)/cocotb/firmware_e2e.c -o $(REPO_ROOT)/build/firmware_e2e.o
 	riscv32-none-elf-gcc -march=rv32im -mabi=ilp32 -nostdlib -ffreestanding -O2 \
 		-I$(REPO_ROOT)/sw/driver -I$(REPO_ROOT)/sw/runtime \
@@ -238,7 +250,8 @@ test_e2e:
 		$(REPO_ROOT)/rtl/cpu/picorv32_adapted.v \
 		$(REPO_ROOT)/rtl/cpu/picorv32_wrapper.sv \
 		$(REPO_ROOT)/rtl/interconnect/axi_crossbar_soc.sv \
-		$(REPO_ROOT)/rtl/interconnect/axi_dma_wrapper.sv \
+		$(REPO_ROOT)/ref/verilog-axi/rtl/axi_dma_rd.v \
+			$(REPO_ROOT)/rtl/interconnect/axi_dma_wrapper.sv \
 		$(REPO_ROOT)/rtl/npu/top.sv \
 		$(REPO_ROOT)/rtl/npu/csr.sv \
 		$(REPO_ROOT)/rtl/npu/pingpong.sv \
@@ -267,8 +280,9 @@ test_e2e_gemm:
 	@rm -rf $(SIM_BUILD)
 	@echo "=== Building E2E GEMM firmware ==="
 	@mkdir -p $(REPO_ROOT)/build
+	@python3 $(REPO_ROOT)/tools/codegen/generate_golden.py --header > $(REPO_ROOT)/build/golden_gemm.h
 	riscv32-none-elf-gcc -march=rv32im -mabi=ilp32 -nostdlib -ffreestanding -O2 \
-		-I$(REPO_ROOT)/sw/driver -I$(REPO_ROOT)/sw/runtime \
+		-I$(REPO_ROOT)/build -I$(REPO_ROOT)/sw/driver -I$(REPO_ROOT)/sw/runtime \
 		-c $(PWD)/cocotb/firmware_gemm.c -o $(REPO_ROOT)/build/firmware_gemm.o
 	riscv32-none-elf-gcc -march=rv32im -mabi=ilp32 -nostdlib -ffreestanding -O2 \
 		-I$(REPO_ROOT)/sw/driver -I$(REPO_ROOT)/sw/runtime \
@@ -298,7 +312,8 @@ test_e2e_gemm:
 		$(REPO_ROOT)/rtl/cpu/picorv32_adapted.v \
 		$(REPO_ROOT)/rtl/cpu/picorv32_wrapper.sv \
 		$(REPO_ROOT)/rtl/interconnect/axi_crossbar_soc.sv \
-		$(REPO_ROOT)/rtl/interconnect/axi_dma_wrapper.sv \
+		$(REPO_ROOT)/ref/verilog-axi/rtl/axi_dma_rd.v \
+			$(REPO_ROOT)/rtl/interconnect/axi_dma_wrapper.sv \
 		$(REPO_ROOT)/rtl/npu/top.sv \
 		$(REPO_ROOT)/rtl/npu/csr.sv \
 		$(REPO_ROOT)/rtl/npu/pingpong.sv \
@@ -327,7 +342,7 @@ test_e2e_dma:
 	@rm -rf $(SIM_BUILD)
 	@echo "=== Building E2E DMA firmware ==="
 	@mkdir -p $(REPO_ROOT)/build
-	riscv32-none-elf-gcc -march=rv32im -mabi=ilp32 -nostdlib -ffreestanding -O2 \
+	riscv32-none-elf-gcc -march=rv32im -mabi=ilp32 -nostdlib -ffreestanding -O2 -std=gnu99 \
 		-c $(PWD)/cocotb/firmware_dma.c -o $(REPO_ROOT)/build/firmware_dma.o
 	riscv32-none-elf-gcc -march=rv32im -mabi=ilp32 -nostdlib \
 		-T $(REPO_ROOT)/sw/linker/riscv32.ld \
@@ -349,7 +364,8 @@ test_e2e_dma:
 		$(REPO_ROOT)/rtl/cpu/picorv32_adapted.v \
 		$(REPO_ROOT)/rtl/cpu/picorv32_wrapper.sv \
 		$(REPO_ROOT)/rtl/interconnect/axi_crossbar_soc.sv \
-		$(REPO_ROOT)/rtl/interconnect/axi_dma_wrapper.sv \
+		$(REPO_ROOT)/ref/verilog-axi/rtl/axi_dma_rd.v \
+			$(REPO_ROOT)/rtl/interconnect/axi_dma_wrapper.sv \
 		$(REPO_ROOT)/rtl/npu/top.sv \
 		$(REPO_ROOT)/rtl/npu/csr.sv \
 		$(REPO_ROOT)/rtl/npu/pingpong.sv \
@@ -378,6 +394,7 @@ test_all:
 	$(MAKE) test_valu
 	$(MAKE) test_sfu
 	$(MAKE) test_dma
+	$(MAKE) test_dma_load
 	$(MAKE) test_memory
 	$(MAKE) test_if_id
 	$(MAKE) test_gemm

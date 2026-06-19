@@ -167,7 +167,7 @@ module picorv32_wrapper (
         else if (cpu_mem_addr[31:16] == 16'h1002)
             slave_sel = 5'b00010;
         // NPU I-SRAM: 0x1001_0000 – 0x1001_1FFF
-        else if (cpu_mem_addr[31:13] == 19'h10008)
+        else if (cpu_mem_addr[31:13] == 19'h08008)
             slave_sel = 5'b00100;
         // NPU MMIO CSR: 0x1000_0000 – 0x1000_0FFF
         else if (cpu_mem_addr[31:12] == 20'h10000)

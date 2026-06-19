@@ -3,11 +3,16 @@
 // Instantiates and wires:
 //   IF/ID → Dispatch → {GEMM, VALU, SFU, DMA} → Crossbar → SRAM banks
 //   CSR register file, Ping-pong controllers
+//
+// DMA AXI master interface passes through to the SoC level for
+// connection to ext_mem_model.
 
 `include "npu_defines.svh"
 `include "isa_defines.svh"
 
-module npu_top (
+module npu_top #(
+    parameter bit DMA_STANDALONE = 0
+) (
     input  logic        clk,
     input  logic        rst_n,
 
@@ -38,12 +43,33 @@ module npu_top (
     // ---- Interrupt ----
     output logic        irq,
 
-    // ---- DMA external memory bypass (connects to shared ext_mem_model) ----
-    input  logic [63:0] dma_ext_rdata,
-    output logic [31:0] dma_ext_addr,
-    output logic        dma_ext_re,
-    output logic        dma_ext_we,
-    output logic [63:0] dma_ext_wdata
+    // ---- DMA AXI4 Master Interface (passthrough to SoC) ----
+    // Read address
+    output logic [31:0] dma_axi_araddr,
+    output logic [7:0]  dma_axi_arlen,
+    output logic        dma_axi_arvalid,
+    input  logic        dma_axi_arready,
+    // Read data
+    input  logic [63:0] dma_axi_rdata,
+    input  logic [1:0]  dma_axi_rresp,
+    input  logic        dma_axi_rlast,
+    input  logic        dma_axi_rvalid,
+    output logic        dma_axi_rready,
+    // Write address
+    output logic [31:0] dma_axi_awaddr,
+    output logic [7:0]  dma_axi_awlen,
+    output logic        dma_axi_awvalid,
+    input  logic        dma_axi_awready,
+    // Write data
+    output logic [63:0] dma_axi_wdata,
+    output logic [7:0]  dma_axi_wstrb,
+    output logic        dma_axi_wlast,
+    output logic        dma_axi_wvalid,
+    input  logic        dma_axi_wready,
+    // Write response
+    input  logic [1:0]  dma_axi_bresp,
+    input  logic        dma_axi_bvalid,
+    output logic        dma_axi_bready
 );
 
     // ================================================================
@@ -59,7 +85,7 @@ module npu_top (
     logic [31:0] csr_desc_ptr;
 
     // ================================================================
-    // Running flag: set by csr_start pulse, cleared by csr_rst
+    // Running flag
     // ================================================================
     logic running;
     always_ff @(posedge clk or negedge rst_n) begin
@@ -71,7 +97,6 @@ module npu_top (
             running <= 1'b1;
     end
 
-    // Combined reset for NPU datapath
     wire dp_rst_n = rst_n && !csr_rst;
 
     // ================================================================
@@ -146,11 +171,9 @@ module npu_top (
     logic [15:0][15:0][15:0] gemm_psum;
     logic               gemm_psum_valid;
 
-    // Forward-declared preloader signals (declared fully in preloader section)
     logic        gpl_gemm_start;
     logic        gpl_feeding;
 
-    // GEMM started by GEMM preloader after data is loaded from crossbar
     assign gemm_start   = gpl_gemm_start;
     assign gemm_k_count = gemm_cmd[7:0];
 
@@ -180,7 +203,6 @@ module npu_top (
     logic [63:0][7:0] valu_test_wdata;
     logic [63:0][7:0] valu_test_rdata;
 
-    // Decode 32-bit VALU instruction
     assign valu_opcode = valu_cmd[31:24];
     assign valu_opt    = valu_cmd[27:20];
     assign valu_rd     = valu_cmd[23:16];
@@ -188,7 +210,6 @@ module npu_top (
     assign valu_rs2    = valu_cmd[7:0];
     assign valu_cmd_gated = valu_cmd_valid;
 
-    // Reshape 512-bit flat ↔ 64×8-bit packed for VALU test interface
     genvar vi;
     generate
         for (vi = 0; vi < 64; vi++) begin : gen_valu_pack
@@ -241,7 +262,6 @@ module npu_top (
         .valid_out   (sfu_valid_out)
     );
 
-    // SFU busy tracking: 3-cycle pipeline shift register
     logic [2:0] sfu_pipe;
     always_ff @(posedge clk or negedge dp_rst_n) begin
         if (!dp_rst_n)
@@ -259,7 +279,7 @@ module npu_top (
     logic [7:0]  dma_opcode_latched;
     logic        dma_done;
 
-    // Forward-declare bridge state type and signals (used by Bug 2 prefill gate)
+    // Bridge state type
     typedef enum logic [1:0] {
         DMA_BR_IDLE   = 2'd0,
         DMA_BR_COPY   = 2'd1,
@@ -268,9 +288,6 @@ module npu_top (
 
     dma_br_state_t dma_br_state, dma_br_next;
 
-    // DMA start: from IF/ID dispatch OR from CSR DMA_CSR3 write
-    // Bug 2 fix: hold DMA in IDLE while bridge PREFILLs (avoids stale/X reads).
-    // When PREFILL completes, a one-cycle restart pulse fires DMA.
     wire prefill_entering = (dma_br_state == DMA_BR_IDLE) && (csr_dma_start && csr_dma_is_store);
     wire prefill_active   = (dma_br_state == DMA_BR_PREFILL);
     wire prefill_done     = prefill_active && (dma_br_next == DMA_BR_IDLE);
@@ -283,16 +300,15 @@ module npu_top (
             dma_restart <= prefill_done;
     end
 
-    assign dma_start  = dma_cmd_valid                          // IF/ID dispatch always passes
-                      || (csr_dma_start && ~prefill_entering)  // CSR start (blocked during prefill entry)
-                      || dma_restart;                           // replay after prefill completes
+    assign dma_start  = dma_cmd_valid
+                      || (csr_dma_start && ~prefill_entering)
+                      || dma_restart;
 
     assign dma_opcode = dma_cmd_valid  ? dma_cmd[31:24] :
                         dma_restart    ? `OP_DMA_ST :
                         csr_dma_start  ? (csr_dma_is_store ? `OP_DMA_ST : `OP_DMA_LD) :
                         8'd0;
 
-    // Latch dma_opcode on dma_start pulse so bridge FSM can inspect it later
     always_ff @(posedge clk or negedge dp_rst_n) begin
         if (!dp_rst_n)
             dma_opcode_latched <= 8'd0;
@@ -312,7 +328,9 @@ module npu_top (
     logic [63:0] dma_sim_ext_wdata;
     logic [63:0] dma_sim_ext_rdata;
 
-    npu_dma u_dma (
+    npu_dma #(
+        .STANDALONE (DMA_STANDALONE)
+    ) u_dma (
         .clk,
         .rst_n         (dp_rst_n),
         .start         (dma_start),
@@ -324,6 +342,31 @@ module npu_top (
         .done          (dma_done),
         .pp_bank       (),
         .pp_ready      (),
+
+        // AXI passthrough
+        .m_axi_araddr  (dma_axi_araddr),
+        .m_axi_arlen   (dma_axi_arlen),
+        .m_axi_arvalid (dma_axi_arvalid),
+        .m_axi_arready (dma_axi_arready),
+        .m_axi_rdata   (dma_axi_rdata),
+        .m_axi_rresp   (dma_axi_rresp),
+        .m_axi_rlast   (dma_axi_rlast),
+        .m_axi_rvalid  (dma_axi_rvalid),
+        .m_axi_rready  (dma_axi_rready),
+        .m_axi_awaddr  (dma_axi_awaddr),
+        .m_axi_awlen   (dma_axi_awlen),
+        .m_axi_awvalid (dma_axi_awvalid),
+        .m_axi_awready (dma_axi_awready),
+        .m_axi_wdata   (dma_axi_wdata),
+        .m_axi_wstrb   (dma_axi_wstrb),
+        .m_axi_wlast   (dma_axi_wlast),
+        .m_axi_wvalid  (dma_axi_wvalid),
+        .m_axi_wready  (dma_axi_wready),
+        .m_axi_bresp   (dma_axi_bresp),
+        .m_axi_bvalid  (dma_axi_bvalid),
+        .m_axi_bready  (dma_axi_bready),
+
+        // Debug
         .sim_sram_en   (dma_sim_sram_en),
         .sim_sram_we   (dma_sim_sram_we),
         .sim_sram_addr (dma_sim_sram_addr),
@@ -342,7 +385,6 @@ module npu_top (
     logic [31:0] xbar_m0_rdata, xbar_m1_rdata, xbar_m2_rdata;
     logic        xbar_m0_grant, xbar_m1_grant, xbar_m2_grant;
 
-    // Crossbar master request signals
     logic        m0_req, m1_req, m2_req;
     logic [15:0] m0_addr, m1_addr, m2_addr;
     logic [31:0] m0_wdata, m1_wdata, m2_wdata;
@@ -382,7 +424,6 @@ module npu_top (
     // into DMA's internal SRAM before DMA STORE starts.
     // ================================================================
     logic [15:0]   dma_br_cnt;
-    logic          dma_br_sim_read;    // sim_sram read done this cycle
 
     always_ff @(posedge clk or negedge dp_rst_n) begin
         if (!dp_rst_n) begin
@@ -395,12 +436,10 @@ module npu_top (
                     dma_br_cnt <= 16'd0;
                 end
                 DMA_BR_PREFILL: begin
-                    // pre-fill: M0 read → sim_sram write
                     if (xbar_m0_grant)
                         dma_br_cnt <= dma_br_cnt + 16'd4;
                 end
                 DMA_BR_COPY: begin
-                    // copy: sim_sram read → M0 write
                     if (xbar_m0_grant)
                         dma_br_cnt <= dma_br_cnt + 16'd4;
                 end
@@ -412,10 +451,8 @@ module npu_top (
         dma_br_next = dma_br_state;
         case (dma_br_state)
             DMA_BR_IDLE: begin
-                // Start copy after DMA LOAD completes
                 if (dma_done && dma_opcode_latched == `OP_DMA_LD)
                     dma_br_next = DMA_BR_COPY;
-                // Start prefill before DMA STORE (when CSR start triggers store)
                 else if (csr_dma_start && csr_dma_is_store)
                     dma_br_next = DMA_BR_PREFILL;
             end
@@ -430,7 +467,6 @@ module npu_top (
         endcase
     end
 
-    // DMA sim_sram interface driven by bridge FSM
     assign dma_sim_sram_en   = (dma_br_state == DMA_BR_COPY) || (dma_br_state == DMA_BR_PREFILL);
     assign dma_sim_sram_we   = (dma_br_state == DMA_BR_PREFILL);
     assign dma_sim_sram_addr = csr_dma_sram_addr + dma_br_cnt;
@@ -442,53 +478,40 @@ module npu_top (
     assign m0_wdata = (dma_br_state == DMA_BR_COPY) ? dma_sim_sram_rdata[31:0] : 32'd0;
     assign m0_wen   = (dma_br_state == DMA_BR_COPY);
 
-    // Tie off DMA sim_ext ports (unused in bridge — wrapper XFER now uses bypass)
+    // DMA sim_ext ports — only used in standalone DMA tests to access
+    // wrapper's internal AXI RAM.  When DMA_STANDALONE=0, the wrapper
+    // ignores sim_ram_* and uses external AXI instead.
     assign dma_sim_ext_en   = 1'b0;
     assign dma_sim_ext_we   = 1'b0;
     assign dma_sim_ext_addr = 32'd0;
     assign dma_sim_ext_wdata= 64'd0;
 
-    // ---- DMA external memory bypass — hierarchical connections ----
-    // The axi_dma_wrapper inside npu_dma now exposes bypass ports.
-    // We wire them to npu_top ports so top_soc can bridge to ext_mem_model.
-    assign u_dma.wrapper.ext_mem_bypass_rdata = dma_ext_rdata;
-    assign dma_ext_addr  = u_dma.wrapper.ext_mem_bypass_addr;
-    assign dma_ext_re    = u_dma.wrapper.ext_mem_bypass_re;
-    assign dma_ext_we    = u_dma.wrapper.ext_mem_bypass_we;
-    assign dma_ext_wdata = u_dma.wrapper.ext_mem_bypass_wdata;
-
     // ================================================================
-    // GEMM Data Preloader (Bug 5/6: gemm data inputs from crossbar)
-    //
-    // Reads A tile data from ASRAM (addr 0x0xxx) and B tile data
-    // from WSRAM (addr 0x1xxx) via crossbar M1, assembles 128-bit
-    // vectors, and feeds gemm_a_in / gemm_b_in.
+    // GEMM Data Preloader
     // ================================================================
     typedef enum logic [2:0] {
         GPL_IDLE      = 3'd0,
-        GPL_LOAD_B0   = 3'd1,   // read B word 0 from WSRAM
+        GPL_LOAD_B0   = 3'd1,
         GPL_LOAD_B1   = 3'd2,
         GPL_LOAD_B2   = 3'd3,
         GPL_LOAD_B3   = 3'd4,
-        GPL_LOAD_A    = 3'd5,   // read all 16 A rows from ASRAM into buffer
-        GPL_START     = 3'd6,   // pulse gemm_start, hand off to systolic array
-        GPL_WAIT      = 3'd7    // wait for gemm_done
+        GPL_LOAD_A    = 3'd5,
+        GPL_START     = 3'd6,
+        GPL_WAIT      = 3'd7
     } gpl_state_t;
 
     gpl_state_t  gpl_state, gpl_next;
-    logic [3:0]  gpl_row;       // current A row (0..15)
-    logic [1:0]  gpl_word;      // which 32-bit word within row (0..3)
-    logic [127:0] gpl_b_buf;    // assembled B column set (128 bits)
+    logic [3:0]  gpl_row;
+    logic [1:0]  gpl_word;
+    logic [127:0] gpl_b_buf;
 
-    // A buffer: 16 rows × 128 bits each (individual regs for iverilog compat)
     logic [127:0] gpl_a_row0, gpl_a_row1,  gpl_a_row2,  gpl_a_row3;
     logic [127:0] gpl_a_row4, gpl_a_row5,  gpl_a_row6,  gpl_a_row7;
     logic [127:0] gpl_a_row8, gpl_a_row9,  gpl_a_row10, gpl_a_row11;
     logic [127:0] gpl_a_row12,gpl_a_row13, gpl_a_row14, gpl_a_row15;
 
-    logic [3:0]  gpl_feed_row;  // which A row to present during COMPUTE
+    logic [3:0]  gpl_feed_row;
 
-    // gpl_read_addr: crossbar address for current read
     logic [15:0] gpl_read_addr;
     always_comb begin
         gpl_read_addr = 16'd0;
@@ -503,7 +526,6 @@ module npu_top (
         endcase
     end
 
-    // Write to A buffer row — explicit case for iverilog
     always_ff @(posedge clk) begin
         if (gpl_state == GPL_LOAD_A && xbar_m1_grant) begin
             case (gpl_row)
@@ -527,7 +549,6 @@ module npu_top (
         end
     end
 
-    // Read from A buffer — combinational mux
     always_comb begin
         case (gpl_feed_row)
             4'd0:  gemm_a_in = gpl_a_row0;
@@ -604,8 +625,6 @@ module npu_top (
                     gpl_feed_row   <= 4'd0;
                 end
                 GPL_WAIT: begin
-                    // Advance feed row each cycle during COMPUTE
-                    // (systolic array consumes one row per cycle when a_valid=1)
                     if (gemm_busy && gpl_feed_row < 4'd15)
                         gpl_feed_row <= gpl_feed_row + 4'd1;
                     if (gemm_done)
@@ -631,7 +650,6 @@ module npu_top (
         endcase
     end
 
-    // M1 (GEMM) read request: active during B and A load phases
     assign m1_req   = (gpl_state == GPL_LOAD_B0 || gpl_state == GPL_LOAD_B1 ||
                        gpl_state == GPL_LOAD_B2 || gpl_state == GPL_LOAD_B3 ||
                        gpl_state == GPL_LOAD_A);
@@ -640,14 +658,10 @@ module npu_top (
     assign m1_wen   = 1'b0;
 
     // ================================================================
-    // GEMM PSUM → OSRAM Writeback (Bug 1 fix)
-    //
-    // When systolic array finishes (psum_valid = 1 cycle pulse),
-    // this FSM writes 16×16 INT16 partial sums into O-SRAM via M2.
-    // 128 × 32-bit words (16 rows × 8 column-pairs of INT16).
+    // GEMM PSUM → OSRAM Writeback
     // ================================================================
     logic        gemm_wb_active;
-    logic [6:0]  gemm_wb_cnt;          // 0..127 words
+    logic [6:0]  gemm_wb_cnt;
     logic [31:0] gemm_wb_wdata;
     logic [15:0] gemm_wb_addr;
 
@@ -668,15 +682,12 @@ module npu_top (
         end
     end
 
-    // Latch psum_out into a buffer when psum_valid pulses (1 cycle)
-    // psum_out holds valid values in the cycle after gemm_done.
     logic [15:0][15:0][15:0] wb_psum_buf;
     always_ff @(posedge clk) begin
         if (gemm_psum_valid)
             wb_psum_buf <= gemm_psum;
     end
 
-    // Generate 128 static 32-bit word wires (iverilog: constant indices only)
     wire [31:0] wb_word_arr [0:127];
     genvar wi, wj;
     generate
@@ -690,23 +701,19 @@ module npu_top (
         end
     endgenerate
 
-    // Comb read: select one word via variable index into unpacked array
     assign gemm_wb_addr  = `OSRAM_BASE + {gemm_wb_cnt, 2'b00};
     assign gemm_wb_wdata = wb_word_arr[gemm_wb_cnt];
 
-    // M2 (VALU/SFU read OR GEMM writeback to O-SRAM)
     assign m2_req   = valu_busy || sfu_busy || gemm_wb_active;
     assign m2_addr  = gemm_wb_active ? gemm_wb_addr : `OSRAM_BASE;
     assign m2_wdata = gemm_wb_active ? gemm_wb_wdata : 32'd0;
     assign m2_wen   = gemm_wb_active;
 
-    // gemm_b_in from preloader B buffer
     assign gemm_b_in = gpl_b_buf[127:0];
 
     // ================================================================
     // Ping-pong buffer controllers
     // ================================================================
-    // GEMM A buffer: 256B × 2 banks
     logic pp_gemm_a_fill, pp_gemm_a_consume;
     logic pp_gemm_a_fill_bank, pp_gemm_a_active_bank, pp_gemm_a_ready;
 
@@ -720,7 +727,6 @@ module npu_top (
         .ready        (pp_gemm_a_ready)
     );
 
-    // GEMM B buffer: 256B × 2 banks
     logic pp_gemm_b_fill, pp_gemm_b_consume;
     logic pp_gemm_b_fill_bank, pp_gemm_b_active_bank, pp_gemm_b_ready;
 
@@ -734,7 +740,6 @@ module npu_top (
         .ready        (pp_gemm_b_ready)
     );
 
-    // GEMM P (partial sum) buffer: 512B × 2 banks
     logic pp_gemm_p_fill, pp_gemm_p_consume;
     logic pp_gemm_p_fill_bank, pp_gemm_p_active_bank, pp_gemm_p_ready;
 
@@ -748,7 +753,6 @@ module npu_top (
         .ready        (pp_gemm_p_ready)
     );
 
-    // VALU buffer: 256B × 2 banks
     logic pp_valu_fill, pp_valu_consume;
     logic pp_valu_fill_bank, pp_valu_active_bank, pp_valu_ready;
 
@@ -762,7 +766,6 @@ module npu_top (
         .ready        (pp_valu_ready)
     );
 
-    // SFU buffer: 256B × 2 banks
     logic pp_sfu_fill, pp_sfu_consume;
     logic pp_sfu_fill_bank, pp_sfu_active_bank, pp_sfu_ready;
 
@@ -776,7 +779,6 @@ module npu_top (
         .ready        (pp_sfu_ready)
     );
 
-    // Ping-pong control signals tied off until load/store units exist
     assign pp_gemm_a_fill    = 1'b0;
     assign pp_gemm_a_consume = gemm_done;
     assign pp_gemm_b_fill    = 1'b0;
@@ -793,8 +795,6 @@ module npu_top (
     // ================================================================
     assign npu_busy = gemm_busy || valu_busy || sfu_busy || dma_busy;
 
-    // going_idle: pulsed when any engine that is currently busy asserts done,
-    // meaning it will go idle on the next cycle.  Used by CSR for IRQ.
     assign npu_going_idle = (gemm_busy && gemm_done)  ||
                             (valu_busy && valu_done)  ||
                             (dma_busy  && dma_done)   ||

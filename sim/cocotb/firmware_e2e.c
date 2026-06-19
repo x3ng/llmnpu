@@ -8,7 +8,7 @@
 //   4. INT8 GEMM via npu_runtime (control path)
 //   5. INT8 ReLU via npu_runtime (control path)
 //
-// Output over UART (0x00000000): 'P' on all checks pass, 'F' on any fail.
+// Output over UART (0x00000008): 'P' on all checks pass, 'F' on any fail.
 // ============================================================
 
 #include "../../sw/runtime/npu_runtime.h"
@@ -74,25 +74,9 @@ static const int8_t test_B[256] = {
      -2,  -1,   0,   1,   2,   3,  -3,  -2
 };
 
-// Golden: C = A x B  (int16 accumulator)
-static const int16_t golden_C[256] = {
-     23,  32,  13, -34,   3,  -2, -35,  23,
-     32,  13, -34,   3,  -2, -35,  23,  32,
-      6,   3, -28,  11,  29,  12, -33,   6,
-      3, -28,  11,  29,  12, -33,   6,   3,
-     31,  16, -27,   0,  -1, -30,  11,  31,
-     16, -27,   0,  -1, -30,  11,  31,  16,
-      0, -27,  16,  31,  11, -30,  -1,   0,
-    -27,  16,  31,  11, -30,  -1,   0, -27,
-     11, -28,   3,   6, -33,  12,  29,  11,
-    -28,   3,   6, -33,  12,  29,  11, -28,
-    -34,  13,  32,  23, -35,  -2,   3, -34,
-     13,  32,  23, -35,  -2,   3, -34,  13,
-    -37,  -9,  -9, -37,  26,  40,  26, -37,
-     -9,  -9, -37,  26,  40,  26, -37,  -9,
-     23,  32,  13, -34,   3,  -2, -35,  23,
-     32,  13, -34,   3,  -2, -35,  23,  32
-};
+// Golden: C = A x B  (int16, in .rodata — auto-generated)
+// Regenerate with: python3 tools/codegen/generate_golden.py --header > build/golden_gemm.h
+#include "../../build/golden_gemm.h"
 
 // ReLU test vector: 64 int8 elements (mixed positive / negative)
 static const int8_t relu_in[64] = {

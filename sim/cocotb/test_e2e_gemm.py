@@ -1,16 +1,15 @@
 """test_e2e_gemm.py — E2E Stage 4: Full NPU GEMM Execution Test
 
 Loads the full SoC (top_soc) with firmware_gemm.c which performs
-a 16x16x16 INT8 GEMM via the NPU runtime and compares all 256 output
-elements against a precomputed golden matrix.
+a 16x16x16 INT8 GEMM via the NPU runtime, DMA STOREs the result
+from O-SRAM to gemm_result in ext_mem, and compares all 256 output
+elements against a precomputed golden matrix embedded in firmware .rodata.
 
-The firmware outputs 'P' (pass) or 'F' (fail) on UART TX.
-
-**IMPORTANT**: The DMA now uses bypass ports connected to the shared
-ext_mem_model (top_soc DMA ext_mem bridge).  The sim_ext debug ports
-are tied off in npu_top.sv and are dead.  This test pre-loads test
-matrices directly into ext_mem_model and reads GEMM results from
-ext_mem_model.
+The firmware outputs a diagnostic sequence on UART TX:
+  Stage markers: I/i (init), A/a (A-DMA), B/b (B-DMA), G/g (GEMM),
+                 S/s (STORE)
+  Result:        'P' (all pass) or
+                 'F' + 1-byte-count + up to 4 x (idx, hw_le16, gold_le16)
 """
 
 import cocotb
@@ -39,29 +38,48 @@ async def wait_uart_chars(dut, count=1, timeout_cycles=2000000, log=None):
                 result.append(val)
                 if log:
                     log.info(f"UART_TX[{len(result)-1}] = 0x{val:02X} "
-                             f"('{chr(val)}') at cycle {cyc}")
+                             f"('{chr(val) if 0x20 <= val < 0x7F else '?'}') at cycle {cyc}")
                 if len(result) >= count:
                     return result
         last_val = val
     return result
 
 
-# ── ext_mem_model helpers ────────────────────────────────────────────────
-# The DMA now reads/writes the shared ext_mem_model via bypass ports.
-# Pre-load test data directly into ext_mem_model word array.
+async def wait_uart_all(dut, max_chars=64, timeout_cycles=2000000,
+                        idle_cycles=5000, log=None):
+    """Capture all UART characters until the line goes idle for `idle_cycles`.
+    Returns list of captured byte values.
+    """
+    result = []
+    last_val = int(dut.uart_tx.value)
+    idle_count = 0
+    for cyc in range(timeout_cycles):
+        await RisingEdge(dut.clk)
+        await Timer(1, unit="ps")
+        val = int(dut.uart_tx.value)
+        if val != last_val:
+            if val != 0:
+                result.append(val)
+                if log:
+                    c = chr(val) if 0x20 <= val < 0x7F else '?'
+                    log.info(f"UART_TX[{len(result)-1}] = 0x{val:02X} ('{c}') at cycle {cyc}")
+                idle_count = 0
+                if len(result) >= max_chars:
+                    return result
+            last_val = val
+        else:
+            idle_count += 1
+            if len(result) > 0 and idle_count >= idle_cycles:
+                return result
+    return result
+
+
+# ── ext_mem_model debug helpers (read-only diagnostics) ───────────────
 
 
 def _ext_mem_word_addr(byte_addr):
     """Convert a 0x4000_xxxx byte address to ext_mem_model word index."""
     return (byte_addr - 0x40000000) // 4
-
-
-def _write_ext_mem_word(dut, word_idx, value):
-    """Write a 32-bit word into ext_mem_model at the given word index."""
-    try:
-        dut.u_dram.mem[word_idx].value = value
-    except Exception:
-        pass  # May fail if VPI access not supported; test will log
 
 
 def _read_ext_mem_word(dut, word_idx):
@@ -72,47 +90,6 @@ def _read_ext_mem_word(dut, word_idx):
         return (True, val)
     except (ValueError, Exception):
         return (False, 0)
-
-
-def ext_mem_write_bytes(dut, byte_addr, data_bytes):
-    """Write an arbitrary byte string into ext_mem_model starting at
-    byte_addr (in 0x4000_xxxx space).  Handles alignment and partial
-    word writes via read-modify-write.
-
-    data_bytes must be a bytes-like object.
-    """
-    word_addr = _ext_mem_word_addr(byte_addr)
-    remainder = byte_addr & 3  # byte offset within first word
-
-    # Read-modify-write partial first word
-    if remainder:
-        ok, existing = _read_ext_mem_word(dut, word_addr)
-        if not ok:
-            existing = 0
-        head_len = min(4 - remainder, len(data_bytes))
-        mask = ((1 << (head_len * 8)) - 1) << (remainder * 8)
-        head_val = int.from_bytes(data_bytes[:head_len], 'little') << (remainder * 8)
-        new_word = (existing & ~mask) | (head_val & mask)
-        _write_ext_mem_word(dut, word_addr, new_word)
-        data_bytes = data_bytes[head_len:]
-        word_addr += 1
-
-    # Full 4-byte writes
-    while len(data_bytes) >= 4:
-        val = int.from_bytes(data_bytes[:4], 'little')
-        _write_ext_mem_word(dut, word_addr, val)
-        data_bytes = data_bytes[4:]
-        word_addr += 1
-
-    # Partial final word
-    if len(data_bytes) > 0:
-        ok, existing = _read_ext_mem_word(dut, word_addr)
-        if not ok:
-            existing = 0
-        mask = (1 << (len(data_bytes) * 8)) - 1
-        tail_val = int.from_bytes(data_bytes, 'little')
-        new_word = (existing & ~mask) | (tail_val & mask)
-        _write_ext_mem_word(dut, word_addr, new_word)
 
 
 def ext_mem_read_bytes(dut, byte_addr, length):
@@ -140,34 +117,13 @@ def ext_mem_read_bytes(dut, byte_addr, length):
     return (all_valid, bytes(data))
 
 
-# ── Precomputed test data from firmware_gemm.c ───────────────────────────
+# ── Golden reference computation ───────────────────────────────────────
 
 
-# test_A[16][16]: A[i][j] = (i + j) % 7 - 3
-def _gen_test_A():
-    import struct
-    data = bytearray()
-    for i in range(16):
-        for j in range(16):
-            val = (i + j) % 7 - 3
-            data.append(struct.pack('b', val)[0])
-    return bytes(data)
-
-
-# test_B[16][16]: B[i][j] = (i * 3 + j) % 7 - 3
-def _gen_test_B():
-    import struct
-    data = bytearray()
-    for i in range(16):
-        for j in range(16):
-            val = (i * 3 + j) % 7 - 3
-            data.append(struct.pack('b', val)[0])
-    return bytes(data)
-
-
-# golden_C: C = A x B (int16, precomputed)
 def _gen_golden_C():
-    # Compute in Python for comparison
+    """Compute golden_C = A x B (int16) using Python for diagnostic
+    comparison on test failure.  Matches the firmware's embedded golden_C
+    and test_A/test_B patterns."""
     import struct
     A = [[0]*16 for _ in range(16)]
     B = [[0]*16 for _ in range(16)]
@@ -193,8 +149,8 @@ async def test_e2e_gemm_pass(dut):
     """Run the GEMM firmware and verify the NPU computes the correct
     matrix multiplication result.
 
-    The firmware outputs 'P' if all 256 elements of C[16][16] match
-    the precomputed golden, or 'F' on any mismatch.
+    The firmware outputs a diagnostic sequence on UART.  We parse it
+    to identify exactly where the pipeline fails.
     """
     # ── Clock ─────────────────────────────────────────────────────────
     clock = Clock(dut.clk, 10, unit="ns")
@@ -204,8 +160,13 @@ async def test_e2e_gemm_pass(dut):
     dut.rst_n.value = 0
     await ClockCycles(dut.clk, 5)
 
-    # ── Read firmware symbol addresses from ELF ──────────────────────
-    import subprocess, os, re
+    # ── Release reset — PicoRV32 starts executing firmware ────────────
+    dut.rst_n.value = 1
+    await RisingEdge(dut.clk)
+    await Timer(1, unit="ps")
+
+    # ── Read firmware symbol addresses from ELF (for diagnostics) ─────
+    import subprocess, os
     elf_path = os.path.join(os.path.dirname(__file__),
                             "..", "..", "build", "firmware_gemm.elf")
     elf_path = os.path.abspath(elf_path)
@@ -232,151 +193,154 @@ async def test_e2e_gemm_pass(dut):
         return syms
 
     symbols = _get_elf_symbols(elf_path)
-    A_addr   = symbols.get('test_A',   0x40000a20)
-    B_addr   = symbols.get('test_B',   0x40000b20)
-    C_addr   = symbols.get('gemm_result', 0x40000e24)
-    sync_addr = symbols.get('sync_flag',   0x40001024)
+    C_addr = symbols.get('gemm_result', 0x40001024)
+    dut._log.info(f"gemm_result @ 0x{C_addr:08X}")
 
-    A_wrap   = A_addr & 0xFFFF
-    B_wrap   = B_addr & 0xFFFF
-    C_wrap   = C_addr & 0xFFFF
-    sync_wrap = sync_addr & 0xFFFF
+    # ── Capture all UART output ───────────────────────────────────────
+    chars = await wait_uart_all(dut, max_chars=64, timeout_cycles=2000000,
+                                idle_cycles=100000, log=dut._log)
 
-    dut._log.info(f"test_A:      0x{A_addr:08X} (wrap=0x{A_wrap:04X})")
-    dut._log.info(f"test_B:      0x{B_addr:08X} (wrap=0x{B_wrap:04X})")
-    dut._log.info(f"gemm_result: 0x{C_addr:08X} (wrap=0x{C_wrap:04X})")
-    dut._log.info(f"sync_flag:   0x{sync_addr:08X} (wrap=0x{sync_wrap:04X})")
+    dut._log.info(f"Total UART chars received: {len(chars)}")
+    dut._log.info(f"Raw UART bytes: {' '.join(f'0x{c:02X}' for c in chars)}")
 
-    # ── Pre-load test data into ext_mem_model ───────────────────────
-    # The DMA now reads/writes the shared ext_mem_model via bypass
-    # ports, so pre-load A and B directly into ext_mem_model.
-    test_A_bytes = _gen_test_A()   # 256 bytes
-    test_B_bytes = _gen_test_B()   # 256 bytes
+    if len(chars) == 0:
+        dut._log.error("No UART characters received — firmware may be hung")
+        assert False, "No UART output received within timeout"
 
-    # Diagnostic: check that ext_mem_model zero-fill works for addresses
-    # beyond the hex file range
-    c_base_word_pre = _ext_mem_word_addr(C_addr)
-    wok_pre, wval_pre = _read_ext_mem_word(dut, c_base_word_pre)
-    dut._log.info(f"Pre-firmware gemm_result word[0] @ idx {c_base_word_pre}: "
-                  f"{'X' if not wok_pre else f'0x{wval_pre:08X}'} "
-                  f"(expected 0x00000000 from zero-fill)")
+    # ── Parse stage markers (first 5 chars) ───────────────────────────
+    stage_names = ["INIT", "A-DMA", "B-DMA", "GEMM", "STORE"]
+    stage_expected = ['I', 'A', 'B', 'G', 'S']
+    stage_results = []
 
-    dut._log.info("Pre-loading test_A into ext_mem_model[0x%04X]" % A_wrap)
-    ext_mem_write_bytes(dut, A_addr, test_A_bytes)
-
-    # Verify a sample byte was written
-    vok, vdata = ext_mem_read_bytes(dut, A_addr, 4)
-    if vok:
-        dut._log.info(f"Verify A[0:4]: {vdata.hex()} (expected {test_A_bytes[:4].hex()})")
+    if len(chars) < 5:
+        dut._log.warning(
+            f"Only {len(chars)} UART chars received, expected at least 5 stage markers"
+        )
+        # Pad with what we have
+        for i in range(min(len(chars), 5)):
+            c = chr(chars[i]) if 0x20 <= chars[i] < 0x7F else '?'
+            expected_ok = stage_expected[i]
+            ok = (c == expected_ok)
+            stage_results.append((stage_names[i], c, ok))
+            dut._log.info(f"  Stage {stage_names[i]}: got '{c}' — "
+                          f"{'PASS' if ok else 'FAIL'}")
+        # Fill remaining with 'missing'
+        for i in range(len(chars), 5):
+            stage_results.append((stage_names[i], '<none>', False))
+            dut._log.info(f"  Stage {stage_names[i]}: <no output> — MISSING")
     else:
-        dut._log.info("Verify A[0:4]: READ RETURNED X — pre-load may not have worked")
+        for i in range(5):
+            c = chr(chars[i]) if 0x20 <= chars[i] < 0x7F else '?'
+            expected_ok = stage_expected[i]
+            ok = (c == expected_ok)
+            stage_results.append((stage_names[i], c, ok))
+            dut._log.info(f"  Stage {stage_names[i]}: got '{c}' — "
+                          f"{'PASS' if ok else 'FAIL'}")
 
-    dut._log.info("Pre-loading test_B into ext_mem_model[0x%04X]" % B_wrap)
-    ext_mem_write_bytes(dut, B_addr, test_B_bytes)
+    # Check which stage failed first
+    first_fail = None
+    for name, c, ok in stage_results:
+        if not ok:
+            first_fail = name
+            break
 
-    # Verify B pre-load
-    vok_b, vdata_b = ext_mem_read_bytes(dut, B_addr, 4)
-    if vok_b:
-        dut._log.info(f"Verify B[0:4]: {vdata_b.hex()} (expected {test_B_bytes[:4].hex()})")
+    if first_fail:
+        dut._log.info(f"*** FIRST FAILING STAGE: {first_fail} ***")
     else:
-        dut._log.info("Verify B[0:4]: READ RETURNED X — pre-load may not have worked")
+        dut._log.info("All 5 pipeline stages reported OK")
 
-    # Golden_C is in the firmware binary's .rodata (ext_mem_model),
-    # which the CPU reads directly — no pre-load needed for that.
-    golden_C_addr = symbols.get('golden_C', 0x40000C20)
-    golden_C_bytes = _gen_golden_C()
-    gok, gdata = ext_mem_read_bytes(dut, golden_C_addr, 4)
-    if gok:
-        dut._log.info(f"Verify golden_C[0:4]: {gdata.hex()} "
-                      f"(expected {golden_C_bytes[:4].hex()})")
-    else:
-        dut._log.warning(f"Verify golden_C[0:4]: READ RETURNED X — "
-                         f"golden_C range may exceed hex file!")
+    # ── Parse result (6th char onwards) ──────────────────────────────
+    if len(chars) >= 6:
+        result_char = chars[5]
+        if chr(result_char) == 'P':
+            dut._log.info("Comparison result: PASS (0 mismatches)")
+        elif chr(result_char) == 'F':
+            # Parse mismatch details
+            if len(chars) >= 7:
+                mismatch_count = chars[6]
+                dut._log.info(f"Comparison result: FAIL — "
+                              f"{mismatch_count} mismatches (reported, may be capped at 255)")
 
-    # ── Release reset — PicoRV32 starts executing ─────────────────────
-    dut.rst_n.value = 1
-    await RisingEdge(dut.clk)
-    await Timer(1, unit="ps")
+                # Parse up to 4 mismatch details (each: 1 idx + 2 hw + 2 gold = 5 bytes)
+                pos = 7
+                n_detail = 0
+                while pos + 4 < len(chars) and n_detail < 4:
+                    idx = chars[pos]
+                    hw_lo = chars[pos + 1]
+                    hw_hi = chars[pos + 2]
+                    gold_lo = chars[pos + 3]
+                    gold_hi = chars[pos + 4]
 
-    # ── Wait for first UART character ────────────────────────────────
-    chars = await wait_uart_chars(dut, count=1, timeout_cycles=2000000,
-                                  log=dut._log)
-    ch_w = chars[0] if chars else None
+                    # Interpret as signed int16 LE
+                    hw_val = (hw_lo | (hw_hi << 8))
+                    if hw_val >= 0x8000:
+                        hw_val -= 0x10000
+                    gold_val = (gold_lo | (gold_hi << 8))
+                    if gold_val >= 0x8000:
+                        gold_val -= 0x10000
 
-    if ch_w is not None:
-        dut._log.info(f"First UART = 0x{ch_w:02X} ('{chr(ch_w)}')")
-
-    # ── After 'W': DMA STORE has already written to ext_mem_model
-    #    via the bypass path.  Verify data is present, then set
-    #    sync_flag so the firmware can proceed. ─────────────────────
-    if ch_w == ord('W'):
-        dut._log.info("Firmware waiting — checking GEMM result in ext_mem_model")
-
-        # Diagnostic: check DMA bypass state signals
-        try:
-            dma_we = int(dut.u_npu.dma_ext_we.value)
-            dma_re = int(dut.u_npu.dma_ext_re.value)
-            dma_addr = int(dut.u_npu.dma_ext_addr.value)
-            dut._log.info(f"DMA bypass state: we={dma_we} re={dma_re} addr=0x{dma_addr:08X}")
-        except Exception as e:
-            dut._log.info(f"DMA bypass signals unreadable: {e}")
-
-        # ── Known RTL gaps (documented) ────────────────────────────────
-        # 1. No GEMM psum → OSRAM writeback path exists yet.
-        #    The systolic array produces psum_out but there is no hardware
-        #    path to write it into the crossbar O-SRAM, so the DMA STORE
-        #    reads uninitialised memory.
-        # 2. DMA-to-Crossbar Bridge PREFILL race: the bridge starts in the
-        #    same cycle as the DMA XFER and writes 4 B/cycle while the DMA
-        #    reads 8 B/cycle → DMA reads X for most bytes.
-        #
-        # Workaround: inject the precomputed golden GEMM result into
-        # ext_mem_model so the firmware sees correct data.
-        golden = _gen_golden_C()
-        ext_mem_write_bytes(dut, C_addr, golden)
-        dut._log.info("Injected golden GEMM result into ext_mem_model "
-                      f"[0x{C_addr:08X}] ({len(golden)} bytes)")
-
-        await RisingEdge(dut.clk)
-        await Timer(1, unit="ps")
-
-        rok, result_bytes = ext_mem_read_bytes(dut, C_addr, 512)
-        if not rok:
-            dut._log.warning("GEMM result read returned X after injection — unexpected")
+                    row = idx // 16
+                    col = idx % 16
+                    dut._log.info(
+                        f"  mismatch[{idx}] (row={row},col={col}): "
+                        f"hw={hw_val}, golden={gold_val}"
+                    )
+                    pos += 5
+                    n_detail += 1
+            else:
+                dut._log.info("Comparison result: FAIL — "
+                              "(no mismatch details received)")
         else:
-            dut._log.info(f"Verified: {len(result_bytes)} bytes readable from "
-                          f"ext_mem_model[0x{C_addr:08X}]")
+            c = chr(result_char) if 0x20 <= result_char < 0x7F else f'0x{result_char:02X}'
+            dut._log.info(f"Unexpected result char: '{c}'")
+    else:
+        dut._log.info("No result character received (only stage markers)")
 
-        c_base_word = _ext_mem_word_addr(C_addr)
-        for wi in range(min(4, 512 // 4)):
-            wok, wval = _read_ext_mem_word(dut, c_base_word + wi)
-            dut._log.info(f"  gemm_result word[{wi}] @ idx {c_base_word+wi}: "
-                          f"{'X' if not wok else f'0x{wval:08X}'}")
+    # ── Additional: read HW gemm_result for cross-check ───────────────
+    golden_bytes = _gen_golden_C()
+    rok, result_bytes = ext_mem_read_bytes(dut, C_addr, 512)
 
-        _write_ext_mem_word(dut, _ext_mem_word_addr(sync_addr), 1)
-        dut._log.info("sync_flag set in ext_mem_model")
-        await RisingEdge(dut.clk)
-        await Timer(1, unit="ps")
+    if rok:
+        import struct
+        hw_mismatches = 0
+        for i in range(256):
+            hw_val = struct.unpack_from('<h', result_bytes, i * 2)[0]
+            gold_val = struct.unpack_from('<h', golden_bytes, i * 2)[0]
+            if hw_val != gold_val:
+                if hw_mismatches < 4:
+                    row = i // 16
+                    col = i % 16
+                    dut._log.info(
+                        f"  [XCHECK] mismatch[{i}] (row={row},col={col}): "
+                        f"hw={hw_val}, golden={gold_val}"
+                    )
+                hw_mismatches += 1
+        dut._log.info(f"[XCHECK] Total HW mismatches: {hw_mismatches}/256")
 
-    # ── Wait for final result character from firmware ────────────────
-    more_chars = await wait_uart_chars(dut, count=1,
-                                       timeout_cycles=2000000,
-                                       log=dut._log)
-    char = more_chars[0] if more_chars else (ch_w if ch_w != ord('W') else None)
+        # Summarize first few HW values vs golden for pattern diagnosis
+        dut._log.info("[XCHECK] First 8 gemm_result values vs golden:")
+        for i in range(min(8, 256)):
+            hw_val = struct.unpack_from('<h', result_bytes, i * 2)[0]
+            gold_val = struct.unpack_from('<h', golden_bytes, i * 2)[0]
+            match_str = "==" if hw_val == gold_val else "!="
+            dut._log.info(f"  [{i:3d}] hw={hw_val:6d} {match_str} golden={gold_val:6d}")
+    else:
+        dut._log.warning("Could not read gemm_result from ext_mem_model (returned X)")
 
-    if char is not None:
-        label = "PASS" if chr(char) == 'P' else ("FAIL" if chr(char) == 'F' else "UNKNOWN")
-        dut._log.info(f"Final result: 0x{char:02X} ('{chr(char)}') — {label}")
+    # ── Final assertion ───────────────────────────────────────────────
+    # The test passes only if all stage markers are uppercase AND
+    # the result is 'P'.
+    all_stages_ok = all(ok for _, _, ok in stage_results)
+    result_ok = (len(chars) >= 6 and chr(chars[5]) == 'P')
 
-    # ── Verify ────────────────────────────────────────────────────────
-    assert char is not None, (
-        "Timeout: no UART character received within 2M cycles"
+    pass_str = (
+        f"Stages: {'ALL-OK' if all_stages_ok else 'FAIL at ' + (first_fail or '?')}, "
+        f"Result: {'PASS' if result_ok else 'FAIL'}"
     )
 
-    assert chr(char) == 'P', (
-        f"UART_TX = 0x{char:02X} ('{chr(char)}'), expected 'P'. "
-        f"Firmware sync protocol failed."
+    assert all_stages_ok and result_ok, (
+        f"E2E GEMM test failed. {pass_str}. "
+        f"UART sequence: {' '.join(f'0x{c:02X}' for c in chars)}"
     )
-    dut._log.info("PASS: E2E Stage 4 (GEMM) — firmware protocol completed, "
-                  "golden result injected into ext_mem (RTL known gaps: "
-                  "no GEMM psum→OSRAM writeback, bridge PREFILL race)")
+
+    dut._log.info(f"E2E GEMM: FULL PASS — {pass_str}")
