@@ -259,9 +259,36 @@ module npu_top (
     logic [7:0]  dma_opcode_latched;
     logic        dma_done;
 
+    // Forward-declare bridge state type and signals (used by Bug 2 prefill gate)
+    typedef enum logic [1:0] {
+        DMA_BR_IDLE   = 2'd0,
+        DMA_BR_COPY   = 2'd1,
+        DMA_BR_PREFILL= 2'd2
+    } dma_br_state_t;
+
+    dma_br_state_t dma_br_state, dma_br_next;
+
     // DMA start: from IF/ID dispatch OR from CSR DMA_CSR3 write
-    assign dma_start  = dma_cmd_valid || csr_dma_start;
+    // Bug 2 fix: hold DMA in IDLE while bridge PREFILLs (avoids stale/X reads).
+    // When PREFILL completes, a one-cycle restart pulse fires DMA.
+    wire prefill_entering = (dma_br_state == DMA_BR_IDLE) && (csr_dma_start && csr_dma_is_store);
+    wire prefill_active   = (dma_br_state == DMA_BR_PREFILL);
+    wire prefill_done     = prefill_active && (dma_br_next == DMA_BR_IDLE);
+
+    logic dma_restart;
+    always_ff @(posedge clk or negedge dp_rst_n) begin
+        if (!dp_rst_n)
+            dma_restart <= 1'b0;
+        else
+            dma_restart <= prefill_done;
+    end
+
+    assign dma_start  = dma_cmd_valid                          // IF/ID dispatch always passes
+                      || (csr_dma_start && ~prefill_entering)  // CSR start (blocked during prefill entry)
+                      || dma_restart;                           // replay after prefill completes
+
     assign dma_opcode = dma_cmd_valid  ? dma_cmd[31:24] :
+                        dma_restart    ? `OP_DMA_ST :
                         csr_dma_start  ? (csr_dma_is_store ? `OP_DMA_ST : `OP_DMA_LD) :
                         8'd0;
 
@@ -354,13 +381,6 @@ module npu_top (
     // For a DMA STORE, the FSM reads from crossbar SRAM and writes
     // into DMA's internal SRAM before DMA STORE starts.
     // ================================================================
-    typedef enum logic [1:0] {
-        DMA_BR_IDLE   = 2'd0,
-        DMA_BR_COPY   = 2'd1,
-        DMA_BR_PREFILL= 2'd2
-    } dma_br_state_t;
-
-    dma_br_state_t dma_br_state, dma_br_next;
     logic [15:0]   dma_br_cnt;
     logic          dma_br_sim_read;    // sim_sram read done this cycle
 
@@ -619,11 +639,66 @@ module npu_top (
     assign m1_wdata = 32'd0;
     assign m1_wen   = 1'b0;
 
-    // M2 (VALU/SFU): connect to VALU active state (read/write to O-SRAM / D-SRAM)
-    assign m2_req   = valu_busy || sfu_busy;
-    assign m2_addr  = `OSRAM_BASE;
-    assign m2_wdata = 32'd0;
-    assign m2_wen   = 1'b0;
+    // ================================================================
+    // GEMM PSUM → OSRAM Writeback (Bug 1 fix)
+    //
+    // When systolic array finishes (psum_valid = 1 cycle pulse),
+    // this FSM writes 16×16 INT16 partial sums into O-SRAM via M2.
+    // 128 × 32-bit words (16 rows × 8 column-pairs of INT16).
+    // ================================================================
+    logic        gemm_wb_active;
+    logic [6:0]  gemm_wb_cnt;          // 0..127 words
+    logic [31:0] gemm_wb_wdata;
+    logic [15:0] gemm_wb_addr;
+
+    always_ff @(posedge clk or negedge dp_rst_n) begin
+        if (!dp_rst_n) begin
+            gemm_wb_active <= 1'b0;
+            gemm_wb_cnt    <= 7'd0;
+        end else begin
+            if (gemm_psum_valid) begin
+                gemm_wb_active <= 1'b1;
+                gemm_wb_cnt    <= 7'd0;
+            end else if (gemm_wb_active && xbar_m2_grant) begin
+                if (gemm_wb_cnt == 7'd127)
+                    gemm_wb_active <= 1'b0;
+                else
+                    gemm_wb_cnt <= gemm_wb_cnt + 7'd1;
+            end
+        end
+    end
+
+    // Latch psum_out into a buffer when psum_valid pulses (1 cycle)
+    // psum_out holds valid values in the cycle after gemm_done.
+    logic [15:0][15:0][15:0] wb_psum_buf;
+    always_ff @(posedge clk) begin
+        if (gemm_psum_valid)
+            wb_psum_buf <= gemm_psum;
+    end
+
+    // Generate 128 static 32-bit word wires (iverilog: constant indices only)
+    wire [31:0] wb_word_arr [0:127];
+    genvar wi, wj;
+    generate
+        for (wi = 0; wi < 16; wi++) begin : wb_row_gen
+            for (wj = 0; wj < 8; wj++) begin : wb_col_gen
+                assign wb_word_arr[wi*8 + wj] = {
+                    wb_psum_buf[wi][wj*2 + 1],
+                    wb_psum_buf[wi][wj*2]
+                };
+            end
+        end
+    endgenerate
+
+    // Comb read: select one word via variable index into unpacked array
+    assign gemm_wb_addr  = `OSRAM_BASE + {gemm_wb_cnt, 2'b00};
+    assign gemm_wb_wdata = wb_word_arr[gemm_wb_cnt];
+
+    // M2 (VALU/SFU read OR GEMM writeback to O-SRAM)
+    assign m2_req   = valu_busy || sfu_busy || gemm_wb_active;
+    assign m2_addr  = gemm_wb_active ? gemm_wb_addr : `OSRAM_BASE;
+    assign m2_wdata = gemm_wb_active ? gemm_wb_wdata : 32'd0;
+    assign m2_wen   = gemm_wb_active;
 
     // gemm_b_in from preloader B buffer
     assign gemm_b_in = gpl_b_buf[127:0];

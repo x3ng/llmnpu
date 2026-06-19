@@ -138,7 +138,7 @@ module csr (
 
     // dma_csr_start: pulse when DMA_CSR3 written with bit[0] set
     assign dma_csr_start    = we && (waddr == A_DMA_CSR3) && wdata[0];
-    assign dma_csr_is_store = dma_csr3[1];
+    assign dma_csr_is_store = (we && (waddr == A_DMA_CSR3)) ? wdata[1] : dma_csr3[1];
 
     // desc_ptr: from CSR register for descriptor fetch
     assign desc_ptr = desc_ptr_reg;
