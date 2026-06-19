@@ -7,8 +7,8 @@
 
 | Item | Status |
 |------|--------|
-| Phase 0 (Setup) | ⬜ pending |
-| Phase 1 (NPU Core RTL) | ⬜ pending |
+| Phase 0 (Setup) | ✅ complete |
+| Phase 1 (NPU Core RTL) | ✅ complete — 7/7 PASS |
 | Phase 2 (NPU Integration) | ⬜ pending |
 | Phase 3 (RISC-V + SoC) | ⬜ pending |
 | Phase 4 (Software / C) | ⬜ pending |
