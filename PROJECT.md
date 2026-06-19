@@ -19,18 +19,18 @@
 ## Task Checklist
 
 ### Phase 0 — Setup
-- [ ] 0.1 Project skeleton (Makefile, README)
-- [ ] 0.2 Clone reference projects into ref/
-- [ ] 0.3 Shared RTL definitions (npu_defines.svh, isa_defines.svh)
+- [x] 0.1 Project skeleton (Makefile, README)
+- [x] 0.2 Clone reference projects into ref/
+- [x] 0.3 Shared RTL definitions (npu_defines.svh, isa_defines.svh)
 
 ### Phase 1 — NPU Core RTL (parallel)
-- [ ] 1.1 PE cell + cocotb test
-- [ ] 1.2 Systolic Array 16×16 + Requant + cocotb test
-- [ ] 1.3 Vector ALU (64-lane SIMD) + cocotb test
-- [ ] 1.4 SFU (LUT: GELU/Sigmoid/Tanh, Quant/Dequant) + cocotb test
-- [ ] 1.5 DMA Engine + cocotb test
-- [ ] 1.6 Memory System (SRAM banks, Crossbar) + cocotb test
-- [ ] 1.7 IF/ID/Dispatch Pipeline + cocotb test
+- [x] 1.1 PE cell + cocotb test
+- [x] 1.2 Systolic Array 16×16 + Requant + cocotb test
+- [x] 1.3 Vector ALU (64-lane SIMD) + cocotb test
+- [x] 1.4 SFU (LUT: GELU/Sigmoid/Tanh, Quant/Dequant) + cocotb test
+- [x] 1.5 DMA Engine + cocotb test
+- [x] 1.6 Memory System (SRAM banks, Crossbar) + cocotb test
+- [x] 1.7 IF/ID/Dispatch Pipeline + cocotb test
 
 ### Phase 2 — NPU Integration
 - [ ] 2.1 NPU Top-Level (csr.sv, pingpong.sv, top.sv) + integration test
