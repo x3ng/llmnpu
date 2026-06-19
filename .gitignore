@@ -1,0 +1,68 @@
+# ============================================================
+# NPU Project .gitignore
+# ============================================================
+
+# --- Nix artifacts ---
+.direnv/
+result/
+result-*
+
+# --- Build artifacts ---
+build/
+obj/
+*.o
+*.a
+*.so
+*.elf
+*.bin
+*.hex
+*.vvp
+*.vcd
+*.lxt
+*.lxt2
+*.fst
+*.ghw
+*.log
+
+# --- Simulation ---
+sim_build/
+__pycache__/
+*.pyc
+*.pyo
+
+# --- Synthesis artifacts ---
+synth/output/
+synth/*.log
+synth/*.dot
+
+# --- Python ---
+*.egg-info/
+.venv/
+venv/
+dist/
+*.whl
+
+# --- Reference projects (downloaded separately) ---
+ref/
+
+# --- IDE / Editor ---
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# --- OS ---
+.DS_Store
+Thumbs.db
+
+# --- Temporary ---
+tmp/
+*.tmp
+*.bak
+
+# --- Superpowers generated content (use PROJECT.md for tracking) ---
+docs/superpowers/
+
+# --- Tool caches ---
+.ccache/
