@@ -134,6 +134,15 @@ module top_soc (
     );
 
     // ============================================================
+    // DMA external memory bypass signals
+    // ============================================================
+    logic [63:0] npu_dma_ext_rdata;
+    logic [31:0] npu_dma_ext_addr;
+    logic        npu_dma_ext_re;
+    logic        npu_dma_ext_we;
+    logic [63:0] npu_dma_ext_wdata;
+
+    // ============================================================
     // NPU Accelerator Top
     // ============================================================
     npu_top u_npu (
@@ -160,7 +169,13 @@ module top_soc (
         .debug_instr    (),
         .debug_stall    (),
 
-        .irq            (npu_irq)
+        .irq            (npu_irq),
+
+        .dma_ext_rdata  (npu_dma_ext_rdata),
+        .dma_ext_addr   (npu_dma_ext_addr),
+        .dma_ext_re     (npu_dma_ext_re),
+        .dma_ext_we     (npu_dma_ext_we),
+        .dma_ext_wdata  (npu_dma_ext_wdata)
     );
 
     // ============================================================
@@ -246,5 +261,31 @@ module top_soc (
         .rdata      (mem_rdata),
         .ready      (mem_ready)
     );
+
+    // ============================================================
+    // DMA External Memory Bridge
+    //
+    // Translates DMA 64-bit byte-addressed accesses to
+    // ext_mem_model 32-bit word-addressed storage.
+    //
+    // Same address translation as the crossbar:
+    //   CPU 0x40000000 → DRAM word 0
+    // ============================================================
+    wire [31:0] dma_offset   = npu_dma_ext_addr - 32'h4000_0000;
+    wire [23:0] dma_word_addr = dma_offset[25:2];
+
+    // Read: combinational — DMA wrapper samples on posedge
+    assign npu_dma_ext_rdata = {
+        u_dram.mem[dma_word_addr + 1],
+        u_dram.mem[dma_word_addr]
+    };
+
+    // Write: clocked — DMA wrapper asserts bypass_we during S_XFER
+    always_ff @(posedge clk) begin
+        if (npu_dma_ext_we) begin
+            u_dram.mem[dma_word_addr]     <= npu_dma_ext_wdata[31:0];
+            u_dram.mem[dma_word_addr + 1] <= npu_dma_ext_wdata[63:32];
+        end
+    end
 
 endmodule

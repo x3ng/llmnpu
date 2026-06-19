@@ -43,7 +43,15 @@ module axi_dma_wrapper (
     input  logic        sim_we,
     input  logic [31:0] sim_addr,
     input  logic [63:0] sim_wdata,
-    output logic [63:0] sim_rdata
+    output logic [63:0] sim_rdata,
+
+    // External memory bypass — connects to shared ext_mem_model
+    // so CPU firmware writes and DMA reads target the same array.
+    input  logic [63:0] ext_mem_bypass_rdata,
+    output logic [31:0] ext_mem_bypass_addr,
+    output logic        ext_mem_bypass_re,
+    output logic        ext_mem_bypass_we,
+    output logic [63:0] ext_mem_bypass_wdata
 );
 
     // --------------------------------------------------------
@@ -127,26 +135,10 @@ module axi_dma_wrapper (
                     xfer_active <= 1'b1;
 
                     if (mode == 2'b01) begin
-                        // LOAD: ext_mem → rd_data (NPU DMA captures into SRAM)
-                        rd_data[7:0]   <= ext_mem[cur_ext_addr  ];
-                        rd_data[15:8]  <= ext_mem[cur_ext_addr+1];
-                        rd_data[23:16] <= ext_mem[cur_ext_addr+2];
-                        rd_data[31:24] <= ext_mem[cur_ext_addr+3];
-                        rd_data[39:32] <= ext_mem[cur_ext_addr+4];
-                        rd_data[47:40] <= ext_mem[cur_ext_addr+5];
-                        rd_data[55:48] <= ext_mem[cur_ext_addr+6];
-                        rd_data[63:56] <= ext_mem[cur_ext_addr+7];
-                    end else if (mode == 2'b10) begin
-                        // STORE: wr_data (from NPU DMA) → ext_mem
-                        ext_mem[cur_ext_addr  ] <= wr_data[7:0];
-                        ext_mem[cur_ext_addr+1] <= wr_data[15:8];
-                        ext_mem[cur_ext_addr+2] <= wr_data[23:16];
-                        ext_mem[cur_ext_addr+3] <= wr_data[31:24];
-                        ext_mem[cur_ext_addr+4] <= wr_data[39:32];
-                        ext_mem[cur_ext_addr+5] <= wr_data[47:40];
-                        ext_mem[cur_ext_addr+6] <= wr_data[55:48];
-                        ext_mem[cur_ext_addr+7] <= wr_data[63:56];
+                        // LOAD: bypass port → rd_data (NPU DMA captures into SRAM)
+                        rd_data <= ext_mem_bypass_rdata;
                     end
+                    // STORE handled through combinational bypass_we / bypass_wdata
 
                     cur_ext_addr <= cur_ext_addr + 8;
                     xfer_cnt     <= xfer_cnt + 8;
@@ -159,6 +151,15 @@ module axi_dma_wrapper (
             endcase
         end
     end
+
+    // --------------------------------------------------------
+    // Combinational bypass outputs — driven from registered state
+    // so the outside sees stable values at the correct cycle.
+    // --------------------------------------------------------
+    assign ext_mem_bypass_addr  = cur_ext_addr;
+    assign ext_mem_bypass_re    = (state == S_XFER) && (mode == 2'b01);
+    assign ext_mem_bypass_we    = (state == S_XFER) && (mode == 2'b10);
+    assign ext_mem_bypass_wdata = wr_data;
 
     // --------------------------------------------------------
     // Next-state logic

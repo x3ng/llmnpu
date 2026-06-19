@@ -36,7 +36,14 @@ module npu_top (
     output logic        debug_stall,
 
     // ---- Interrupt ----
-    output logic        irq
+    output logic        irq,
+
+    // ---- DMA external memory bypass (connects to shared ext_mem_model) ----
+    input  logic [63:0] dma_ext_rdata,
+    output logic [31:0] dma_ext_addr,
+    output logic        dma_ext_re,
+    output logic        dma_ext_we,
+    output logic [63:0] dma_ext_wdata
 );
 
     // ================================================================
@@ -406,11 +413,20 @@ module npu_top (
     assign m0_wdata = (dma_br_state == DMA_BR_COPY) ? dma_sim_sram_rdata[31:0] : 32'd0;
     assign m0_wen   = (dma_br_state == DMA_BR_COPY);
 
-    // Tie off DMA sim_ext ports (unused in bridge)
+    // Tie off DMA sim_ext ports (unused in bridge — wrapper XFER now uses bypass)
     assign dma_sim_ext_en   = 1'b0;
     assign dma_sim_ext_we   = 1'b0;
     assign dma_sim_ext_addr = 32'd0;
     assign dma_sim_ext_wdata= 64'd0;
+
+    // ---- DMA external memory bypass — hierarchical connections ----
+    // The axi_dma_wrapper inside npu_dma now exposes bypass ports.
+    // We wire them to npu_top ports so top_soc can bridge to ext_mem_model.
+    assign u_dma.wrapper.ext_mem_bypass_rdata = dma_ext_rdata;
+    assign dma_ext_addr  = u_dma.wrapper.ext_mem_bypass_addr;
+    assign dma_ext_re    = u_dma.wrapper.ext_mem_bypass_re;
+    assign dma_ext_we    = u_dma.wrapper.ext_mem_bypass_we;
+    assign dma_ext_wdata = u_dma.wrapper.ext_mem_bypass_wdata;
 
     // ================================================================
     // GEMM Data Preloader (Bug 5/6: gemm data inputs from crossbar)
