@@ -146,9 +146,9 @@ module top_soc (
         .csr_re         (npu_csr_mmio_re),
         .csr_rdata      (npu_csr_mmio_rdata),
 
-        .dbg_imem_we    (1'b0),
-        .dbg_imem_addr  (8'd0),
-        .dbg_imem_wdata (32'd0),
+        .dbg_imem_we    (npu_isram_req && npu_isram_write),
+        .dbg_imem_addr  (npu_isram_addr[9:2]),
+        .dbg_imem_wdata (npu_isram_wdata),
 
         .dbg_valu_wen       (1'b0),
         .dbg_valu_waddr     (5'd0),

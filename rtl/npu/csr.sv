@@ -24,7 +24,13 @@ module csr (
 
     // DMA CSR register outputs (for top-level DMA wiring)
     output logic [31:0] dma_ext_addr,
-    output logic [31:0] dma_sram_len,
+    output logic [15:0] dma_sram_addr,
+    output logic [15:0] dma_length,
+    output logic        dma_csr_start,
+    output logic        dma_csr_is_store,
+
+    // Descriptor pointer
+    output logic [31:0] desc_ptr,
 
     // Interrupt
     output logic        irq
@@ -37,10 +43,11 @@ module csr (
     localparam logic [9:0] A_STATUS    = 10'h01;
     localparam logic [9:0] A_PC        = 10'h02;
     localparam logic [9:0] A_DESC_PTR  = 10'h04;
-    localparam logic [9:0] A_DMA_CSR0  = 10'h08;
-    localparam logic [9:0] A_DMA_CSR1  = 10'h09;
-    localparam logic [9:0] A_DMA_CSR2  = 10'h0A;
-    localparam logic [9:0] A_DMA_CSR3  = 10'h0B;
+    // DMA CSR word addresses (byte offsets: 0x20, 0x28, 0x30, 0x38)
+    localparam logic [9:0] A_DMA_CSR0  = 10'h08;   // byte 0x20
+    localparam logic [9:0] A_DMA_CSR1  = 10'h0A;   // byte 0x28
+    localparam logic [9:0] A_DMA_CSR2  = 10'h0C;   // byte 0x30
+    localparam logic [9:0] A_DMA_CSR3  = 10'h0E;   // byte 0x38
     localparam logic [9:0] A_IRQ_EN    = 10'h10;
     localparam logic [9:0] A_IRQ_STAT  = 10'h11;
     localparam logic [9:0] A_PERF_CYC  = 10'h20;
@@ -124,8 +131,17 @@ module csr (
     // ----------------------------------------------------------------
     // DMA CSR outputs (combinational — top samples when needed)
     // ----------------------------------------------------------------
-    assign dma_ext_addr = dma_csr0;
-    assign dma_sram_len = dma_csr1;
+    // CSR0 = ext_addr, CSR1 = sram_off, CSR2 = length, CSR3 = ctrl
+    assign dma_ext_addr   = dma_csr0;
+    assign dma_sram_addr  = dma_csr1[15:0];
+    assign dma_length     = dma_csr2[15:0];
+
+    // dma_csr_start: pulse when DMA_CSR3 written with bit[0] set
+    assign dma_csr_start    = we && (waddr == A_DMA_CSR3) && wdata[0];
+    assign dma_csr_is_store = dma_csr3[1];
+
+    // desc_ptr: from CSR register for descriptor fetch
+    assign desc_ptr = desc_ptr_reg;
 
     // ----------------------------------------------------------------
     // Control outputs
