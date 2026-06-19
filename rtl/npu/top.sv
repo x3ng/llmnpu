@@ -256,6 +256,7 @@ module npu_top (
     // ================================================================
     logic        dma_start;
     logic [7:0]  dma_opcode;
+    logic [7:0]  dma_opcode_latched;
     logic        dma_done;
 
     // DMA start: from IF/ID dispatch OR from CSR DMA_CSR3 write
@@ -263,6 +264,14 @@ module npu_top (
     assign dma_opcode = dma_cmd_valid  ? dma_cmd[31:24] :
                         csr_dma_start  ? (csr_dma_is_store ? `OP_DMA_ST : `OP_DMA_LD) :
                         8'd0;
+
+    // Latch dma_opcode on dma_start pulse so bridge FSM can inspect it later
+    always_ff @(posedge clk or negedge dp_rst_n) begin
+        if (!dp_rst_n)
+            dma_opcode_latched <= 8'd0;
+        else if (dma_start)
+            dma_opcode_latched <= dma_opcode;
+    end
 
     // DMA sim port wires (for DMA→Crossbar bridge)
     logic        dma_sim_sram_en;
@@ -384,7 +393,7 @@ module npu_top (
         case (dma_br_state)
             DMA_BR_IDLE: begin
                 // Start copy after DMA LOAD completes
-                if (dma_done && dma_opcode == `OP_DMA_LD)
+                if (dma_done && dma_opcode_latched == `OP_DMA_LD)
                     dma_br_next = DMA_BR_COPY;
                 // Start prefill before DMA STORE (when CSR start triggers store)
                 else if (csr_dma_start && csr_dma_is_store)
