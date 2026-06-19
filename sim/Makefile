@@ -12,7 +12,7 @@ EXTRA_ARGS =
 
 include $(shell cocotb-config --makefiles)/Makefile.sim
 
-.PHONY: test_pe test_gemm test_valu test_sfu test_dma test_memory test_if_id
+.PHONY: test_pe test_gemm test_valu test_sfu test_dma test_memory test_if_id test_npu_top
 .PHONY: test_all clean
 
 # ── Individual test targets (each isolated, can run in parallel) ──
@@ -73,6 +73,34 @@ test_if_id:
 	VERILOG_SOURCES="$(REPO_ROOT)/rtl/npu/if_id/ifetch.sv $(REPO_ROOT)/rtl/npu/if_id/idecode.sv $(REPO_ROOT)/rtl/npu/if_id/dispatch.sv $(REPO_ROOT)/rtl/npu/if_id/if_id_top.sv" \
 	$(MAKE)
 
+test_npu_top: SIM_BUILD = sim_build_npu_top
+test_npu_top:
+	@rm -rf $(SIM_BUILD)
+	PYTHONPATH=$(PWD)/cocotb:$$PYTHONPATH \
+	MODULE=test_npu_top TOPLEVEL=npu_top \
+	VERILOG_SOURCES="\
+		$(REPO_ROOT)/rtl/npu/if_id/ifetch.sv \
+		$(REPO_ROOT)/rtl/npu/if_id/idecode.sv \
+		$(REPO_ROOT)/rtl/npu/if_id/dispatch.sv \
+		$(REPO_ROOT)/rtl/npu/if_id/if_id_top.sv \
+		$(REPO_ROOT)/rtl/npu/gemm/pe.sv \
+		$(REPO_ROOT)/rtl/npu/gemm/systolic_array.sv \
+		$(REPO_ROOT)/rtl/npu/gemm/gemm_controller.sv \
+		$(REPO_ROOT)/rtl/npu/valu/valu_lane.sv \
+		$(REPO_ROOT)/rtl/npu/valu/vregfile.sv \
+		$(REPO_ROOT)/rtl/npu/valu/valu_top.sv \
+		$(REPO_ROOT)/rtl/npu/sfu/lut_engine.sv \
+		$(REPO_ROOT)/rtl/npu/sfu/quant_dequant.sv \
+		$(REPO_ROOT)/rtl/npu/sfu/sfu_top.sv \
+		$(REPO_ROOT)/rtl/interconnect/axi_dma_wrapper.sv \
+		$(REPO_ROOT)/rtl/npu/dma/npu_dma.sv \
+		$(REPO_ROOT)/rtl/npu/memory/sram_bank.sv \
+		$(REPO_ROOT)/rtl/npu/memory/crossbar.sv \
+		$(REPO_ROOT)/rtl/npu/csr.sv \
+		$(REPO_ROOT)/rtl/npu/pingpong.sv \
+		$(REPO_ROOT)/rtl/npu/top.sv" \
+	$(MAKE)
+
 # ── Batch targets ──
 
 test_all:
@@ -83,6 +111,7 @@ test_all:
 	$(MAKE) test_memory
 	$(MAKE) test_if_id
 	$(MAKE) test_gemm
+	$(MAKE) test_npu_top
 
 clean::
 	rm -rf sim_build sim_build_* __pycache__

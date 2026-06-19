@@ -1,0 +1,292 @@
+"""test_npu_top.py — Minimal integration test for NPU top-level.
+
+Tests:
+  1. CSR read/write: write CTRL register, read back STATUS and PERF_CYCLE
+  2. VALU VADD via IF/ID dispatch: load instruction, execute, verify result
+  3. IRQ on done: enable IRQ, verify irq_stat[0] set when NPU goes idle
+"""
+
+import cocotb
+from cocotb.clock import Clock
+from cocotb.triggers import RisingEdge, Timer, ClockCycles
+
+
+# ---------- Helpers ----------
+
+def pack_bytes(bytes_list):
+    """Pack 64 bytes into a 512-bit integer. Lane 0 -> bits [7:0]."""
+    result = 0
+    for i, b in enumerate(bytes_list):
+        result |= ((b & 0xFF) << (i * 8))
+    return result
+
+
+def unpack_bytes(value, count=64):
+    """Unpack an integer into a list of bytes (little-endian per lane)."""
+    v = int(value)
+    return [(v >> (i * 8)) & 0xFF for i in range(count)]
+
+
+# CSR word addresses (byte addr >> 2)
+CSR_CTRL      = 0x00
+CSR_STATUS    = 0x01
+CSR_PC        = 0x02
+CSR_DESC_PTR  = 0x04
+CSR_IRQ_EN    = 0x10
+CSR_IRQ_STAT  = 0x11
+CSR_PERF_CYC  = 0x20
+
+
+async def csr_write(dut, addr_word, value):
+    """Write a 32-bit value to a CSR register (word address)."""
+    dut.csr_addr.value = addr_word << 2
+    dut.csr_wdata.value = value
+    dut.csr_we.value = 1
+    await RisingEdge(dut.clk)
+    dut.csr_we.value = 0
+    dut.csr_addr.value = 0
+    dut.csr_wdata.value = 0
+
+
+async def csr_read(dut, addr_word):
+    """Read a 32-bit value from a CSR register (word address)."""
+    dut.csr_addr.value = addr_word << 2
+    dut.csr_re.value = 1
+    await Timer(1, unit="ns")
+    val = int(dut.csr_rdata.value)
+    dut.csr_re.value = 0
+    dut.csr_addr.value = 0
+    return val
+
+
+async def if_load(dut, addr, instr):
+    """Load a 32-bit instruction into IF/ID imem at given address."""
+    dut.dbg_imem_we.value = 1
+    dut.dbg_imem_addr.value = addr
+    dut.dbg_imem_wdata.value = instr
+    await RisingEdge(dut.clk)
+    dut.dbg_imem_we.value = 0
+
+
+async def valu_write_reg(dut, reg_idx, byte_list):
+    """Write 64 bytes to a VALU register file entry."""
+    dut.dbg_valu_wen.value = 1
+    dut.dbg_valu_waddr.value = reg_idx
+    dut.dbg_valu_wdata_flat.value = pack_bytes(byte_list)
+    await RisingEdge(dut.clk)
+    dut.dbg_valu_wen.value = 0
+
+
+async def valu_read_reg(dut, reg_idx):
+    """Read 64 bytes from a VALU register file entry."""
+    dut.dbg_valu_raddr.value = reg_idx
+    await Timer(1, unit="ns")
+    val = int(dut.dbg_valu_rdata_flat.value)
+    dut.dbg_valu_raddr.value = 0
+    return unpack_bytes(val)
+
+
+async def setup_dut(dut):
+    """Start clock and initialize all inputs."""
+    clock = Clock(dut.clk, 10, unit="ns")
+    cocotb.start_soon(clock.start())
+
+    # Drive all inputs low
+    dut.rst_n.value = 0
+    dut.csr_addr.value = 0
+    dut.csr_wdata.value = 0
+    dut.csr_we.value = 0
+    dut.csr_re.value = 0
+    dut.dbg_imem_we.value = 0
+    dut.dbg_imem_addr.value = 0
+    dut.dbg_imem_wdata.value = 0
+    dut.dbg_valu_wen.value = 0
+    dut.dbg_valu_waddr.value = 0
+    dut.dbg_valu_wdata_flat.value = 0
+    dut.dbg_valu_raddr.value = 0
+
+    await ClockCycles(dut.clk, 3)
+
+
+# =========================================================================
+
+
+@cocotb.test()
+async def test_csr_rw(dut):
+    """Test 1: CSR register read/write.
+
+    Write CTRL, read back STATUS, verify PERF_CYCLE is incrementing.
+    """
+    await setup_dut(dut)
+
+    # Release external reset
+    dut.rst_n.value = 1
+    await RisingEdge(dut.clk)
+
+    # Read STATUS at reset — should be 0
+    status = await csr_read(dut, CSR_STATUS)
+    assert status == 0, f"STATUS after reset: 0x{status:08X} (expected 0)"
+
+    # Read PERF_CYCLE, wait a few cycles, read again
+    pc1 = await csr_read(dut, CSR_PERF_CYC)
+    await ClockCycles(dut.clk, 5)
+    pc2 = await csr_read(dut, CSR_PERF_CYC)
+    assert pc2 > pc1, f"PERF_CYCLE not incrementing: {pc1} -> {pc2}"
+
+    dut._log.info(f"PASS: CSR R/W — PERF_CYCLE {pc1} → {pc2}")
+
+
+@cocotb.test()
+async def test_valu_integration(dut):
+    """Test 2: VALU VADD via IF/ID dispatch pipeline.
+
+    Flow:
+      1. CSR reset=1 (hold IF/ID in reset)
+      2. Load VADD instruction into IF/ID imem[0]
+      3. Write VALU regfile[2]=10, regfile[3]=25
+      4. CSR start=1 (release reset + start)
+      5. Wait for VALU to complete (busy → idle)
+      6. Read VALU regfile[1] = 10+25 = 35
+    """
+    await setup_dut(dut)
+
+    # Release external reset (CSR reset still holds dp_rst_n low)
+    dut.rst_n.value = 1
+    await RisingEdge(dut.clk)
+    await Timer(1, unit="ps")
+
+    # ---- Step 1: Assert CSR reset ----
+    await csr_write(dut, CSR_CTRL, 0x00000002)  # bit1=reset
+    await RisingEdge(dut.clk)
+
+    # ---- Step 2: Load instruction: VADD rd=1, rs1=2, rs2=3 ----
+    #   opcode=0x10 (VADD/VALU), opt=0x00 (VOPT_ADD)
+    #   Instruction format: [31:24]=opcode, [27:20]=opt,
+    #                       [23:16]=rd, [15:8]=rs1, [7:0]=rs2
+    vadd_instr = (0x10 << 24) | (0x00 << 20) | (1 << 16) | (2 << 8) | 3
+    await if_load(dut, 0, vadd_instr)
+    # Pad with NOPs so pipeline doesn't read X
+    NOP = 0xFF000000
+    for i in range(1, 4):
+        await if_load(dut, i, NOP)
+
+    # ---- Step 3: Write VALU register file ----
+    #   regfile[2] = all lanes = 10 (INT8)
+    #   regfile[3] = all lanes = 25 (INT8)
+    vec_a = [10] * 64
+    vec_b = [25] * 64
+    await valu_write_reg(dut, 2, vec_a)
+    await valu_write_reg(dut, 3, vec_b)
+
+    # Verify regfile writes
+    readback_a = await valu_read_reg(dut, 2)
+    assert readback_a[0] == 10, f"Reg[2] lane 0: {readback_a[0]} != 10"
+    readback_b = await valu_read_reg(dut, 3)
+    assert readback_b[0] == 25, f"Reg[3] lane 0: {readback_b[0]} != 25"
+    dut._log.info("VALU regfile preload verified")
+
+    # ---- Step 4: Release CSR reset + start ----
+    await csr_write(dut, CSR_CTRL, 0x00000001)  # bit0=start, bit1=0
+    await RisingEdge(dut.clk)
+    await Timer(1, unit="ps")
+
+    # Check that STATUS shows busy
+    status = await csr_read(dut, CSR_STATUS)
+    dut._log.info(f"STATUS after start: 0x{status:08X}")
+
+    # ---- Step 5: Poll for NPU busy, then idle ----
+    busy_seen = False
+    idle_seen = False
+    for cycle in range(200):
+        await RisingEdge(dut.clk)
+        await Timer(1, unit="ps")
+        status = await csr_read(dut, CSR_STATUS)
+        busy = status & 1
+        if busy:
+            busy_seen = True
+        if busy_seen and not busy:
+            idle_seen = True
+            dut._log.info(f"NPU idle at cycle {cycle} (busy first seen)")
+            break
+
+    assert busy_seen, "NPU never went busy"
+    assert idle_seen, "NPU did not return to idle within timeout"
+
+    # ---- Step 6: Read VALU result regfile[1] ----
+    result = await valu_read_reg(dut, 1)
+    expected = [(10 + 25) & 0xFF] * 64
+
+    errors = []
+    for i in range(64):
+        if result[i] != expected[i]:
+            errors.append(f"  Lane {i}: got 0x{result[i]:02x}, expected 0x{expected[i]:02x}")
+
+    if errors:
+        for err in errors[:10]:
+            dut._log.error(err)
+        assert False, f"VADD mismatch in {len(errors)}/64 lanes"
+
+    dut._log.info(f"PASS: VALU VADD via IF/ID — reg[1] lane[0]={result[0]} (expected 35)")
+
+
+@cocotb.test()
+async def test_irq_on_done(dut):
+    """Test 3: IRQ asserted on NPU done.
+
+    Enable IRQ, run a VALU instruction, verify irq_stat[0] set when NPU idle.
+    """
+    await setup_dut(dut)
+
+    dut.rst_n.value = 1
+    await RisingEdge(dut.clk)
+    await Timer(1, unit="ps")
+
+    # Assert CSR reset
+    await csr_write(dut, CSR_CTRL, 0x00000002)
+    await RisingEdge(dut.clk)
+
+    # Load a simple VADD instruction
+    vadd_instr = (0x10 << 24) | (0x00 << 20) | (1 << 16) | (2 << 8) | 3
+    await if_load(dut, 0, vadd_instr)
+    for i in range(1, 4):
+        await if_load(dut, i, 0xFF000000)
+
+    # Preload VALU registers
+    await valu_write_reg(dut, 2, [5] * 64)
+    await valu_write_reg(dut, 3, [7] * 64)
+
+    # Enable IRQ
+    await csr_write(dut, CSR_IRQ_EN, 0x00000001)
+    await csr_write(dut, CSR_IRQ_STAT, 0x00000001)  # clear any pending
+
+    # Start NPU
+    await csr_write(dut, CSR_CTRL, 0x00000001)
+    await RisingEdge(dut.clk)
+    await Timer(1, unit="ps")
+
+    # Wait for busy then idle
+    busy_seen = False
+    for _ in range(200):
+        await RisingEdge(dut.clk)
+        await Timer(1, unit="ps")
+        status = await csr_read(dut, CSR_STATUS)
+        if status & 1:
+            busy_seen = True
+        if busy_seen and not (status & 1):
+            break
+
+    assert busy_seen, "NPU never went busy in IRQ test"
+
+    # Check IRQ status
+    irq_stat = await csr_read(dut, CSR_IRQ_STAT)
+    assert irq_stat & 1, f"IRQ_STAT[0] not set: 0x{irq_stat:08X}"
+
+    # Verify irq output
+    irq_val = int(dut.irq.value)
+    assert irq_val == 1, f"irq output not asserted: got {irq_val}"
+
+    dut._log.info(f"PASS: IRQ on done — irq_stat=0x{irq_stat:08X}, irq_out={irq_val}")
+
+    # Read result
+    result = await valu_read_reg(dut, 1)
+    assert result[0] == ((5 + 7) & 0xFF), f"Unexpected result: {result[0]}"
