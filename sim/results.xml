@@ -1,8 +1,6 @@
 <testsuites name="results">
   <testsuite name="all" package="all">
-    <property name="random_seed" value="1781891948" />
-    <testcase name="test_e2e_gemm_pass" classname="test_e2e_gemm" file="/home/xen/Project/llmeda/npu/sim/cocotb/test_e2e_gemm.py" lineno="191" time="1548.9073040485382" sim_time_ns="24921400.0" ratio_time="16089.665233587817">
-      <failure error_type="SimFailure" error_msg="Simulator shut down prematurely" />
-    </testcase>
+    <property name="random_seed" value="1781908613" />
+    <testcase name="test_e2e_gemm_pass" classname="test_e2e_gemm" file="/home/xen/Project/llmeda/npu/sim/cocotb/test_e2e_gemm.py" lineno="191" time="41.589738607406616" sim_time_ns="628070.001" ratio_time="15101.561635882668" />
   </testsuite>
 </testsuites>
