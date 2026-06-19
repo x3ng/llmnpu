@@ -75,6 +75,7 @@ module axi_dma_wrapper (
         end
     end
 
+    // --------------------------------------------------------
     // Simulation debug read (registered — updated after NBA settles)
     reg [63:0] sim_rdata_reg;
     always_ff @(posedge clk or negedge rst_n) begin
@@ -108,6 +109,25 @@ module axi_dma_wrapper (
     reg [31:0] cur_ext_addr;    // current ext_mem address (increments by 8)
 
     // --------------------------------------------------------
+    // Combinational LOAD read from internal ext_mem
+    //
+    // ext_mem is indexed by flat byte address (0..65535).
+    // When the hierarchical bypass is driven (top_soc), the
+    // bypass rdata takes precedence via the registered assignment
+    // below.  When bypass is undriven (standalone npu_dma
+    // tests), internal ext_mem provides the data.
+    // --------------------------------------------------------
+    wire [63:0] internal_rd_data;
+    assign internal_rd_data[7:0]   = ext_mem[cur_ext_addr[15:0]  ];
+    assign internal_rd_data[15:8]  = ext_mem[cur_ext_addr[15:0]+1];
+    assign internal_rd_data[23:16] = ext_mem[cur_ext_addr[15:0]+2];
+    assign internal_rd_data[31:24] = ext_mem[cur_ext_addr[15:0]+3];
+    assign internal_rd_data[39:32] = ext_mem[cur_ext_addr[15:0]+4];
+    assign internal_rd_data[47:40] = ext_mem[cur_ext_addr[15:0]+5];
+    assign internal_rd_data[55:48] = ext_mem[cur_ext_addr[15:0]+6];
+    assign internal_rd_data[63:56] = ext_mem[cur_ext_addr[15:0]+7];
+
+    // --------------------------------------------------------
     // Sequential logic
     // --------------------------------------------------------
     always_ff @(posedge clk or negedge rst_n) begin
@@ -135,10 +155,25 @@ module axi_dma_wrapper (
                     xfer_active <= 1'b1;
 
                     if (mode == 2'b01) begin
-                        // LOAD: bypass port → rd_data (NPU DMA captures into SRAM)
-                        rd_data <= ext_mem_bypass_rdata;
+                        // LOAD: use bypass rdata if driven, else internal ext_mem
+                        if (!$isunknown(ext_mem_bypass_rdata))
+                            rd_data <= ext_mem_bypass_rdata;
+                        else
+                            rd_data <= internal_rd_data;
+                    end else if (mode == 2'b10) begin
+                        // STORE: write to internal ext_mem so standalone tests
+                        // can read data back via sim debug port.  The
+                        // combinational bypass_we / bypass_wdata path also
+                        // writes to u_dram.mem when connected through top_soc.
+                        ext_mem[cur_ext_addr[15:0]  ] <= wr_data[7:0];
+                        ext_mem[cur_ext_addr[15:0]+1] <= wr_data[15:8];
+                        ext_mem[cur_ext_addr[15:0]+2] <= wr_data[23:16];
+                        ext_mem[cur_ext_addr[15:0]+3] <= wr_data[31:24];
+                        ext_mem[cur_ext_addr[15:0]+4] <= wr_data[39:32];
+                        ext_mem[cur_ext_addr[15:0]+5] <= wr_data[47:40];
+                        ext_mem[cur_ext_addr[15:0]+6] <= wr_data[55:48];
+                        ext_mem[cur_ext_addr[15:0]+7] <= wr_data[63:56];
                     end
-                    // STORE handled through combinational bypass_we / bypass_wdata
 
                     cur_ext_addr <= cur_ext_addr + 8;
                     xfer_cnt     <= xfer_cnt + 8;

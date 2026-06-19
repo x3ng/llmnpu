@@ -288,4 +288,44 @@ module top_soc (
         end
     end
 
+    // ============================================================
+    // DMA Wrapper Internal ExtMem Mirror
+    //
+    // The axi_dma_wrapper has an internal 64 KB byte-addressable
+    // ext_mem used as a fallback when the hierarchical bypass
+    // rdata port is undriven (e.g. standalone npu_dma tests).
+    //
+    // We mirror the first 64 KB of u_dram.mem into the wrapper's
+    // internal ext_mem so that DMA LOADs see firmware-loaded data.
+    // ============================================================
+
+    // Initial copy from u_dram.mem (contains $readmemh firmware)
+    // into wrapper's internal ext_mem — done at time 0.
+    integer _mirror_init_idx;
+    initial begin
+        // Small delay to let $readmemh populate u_dram.mem
+        #1;
+        for (_mirror_init_idx = 0; _mirror_init_idx < 16384; _mirror_init_idx = _mirror_init_idx + 1) begin
+            u_npu.u_dma.wrapper.ext_mem[_mirror_init_idx*4  ] = u_dram.mem[_mirror_init_idx][ 7: 0];
+            u_npu.u_dma.wrapper.ext_mem[_mirror_init_idx*4+1] = u_dram.mem[_mirror_init_idx][15: 8];
+            u_npu.u_dma.wrapper.ext_mem[_mirror_init_idx*4+2] = u_dram.mem[_mirror_init_idx][23:16];
+            u_npu.u_dma.wrapper.ext_mem[_mirror_init_idx*4+3] = u_dram.mem[_mirror_init_idx][31:24];
+        end
+    end
+
+    // Runtime mirror: track CPU writes to the first 64 KB of ext_mem
+    // and forward them into the wrapper's internal ext_mem.
+    always_ff @(posedge clk) begin
+        if (mem_req && mem_write && mem_addr < 24'd16384) begin
+            if (mem_wstrb[0])
+                u_npu.u_dma.wrapper.ext_mem[{mem_addr, 2'b00}  ] <= mem_wdata[ 7: 0];
+            if (mem_wstrb[1])
+                u_npu.u_dma.wrapper.ext_mem[{mem_addr, 2'b00}+1] <= mem_wdata[15: 8];
+            if (mem_wstrb[2])
+                u_npu.u_dma.wrapper.ext_mem[{mem_addr, 2'b00}+2] <= mem_wdata[23:16];
+            if (mem_wstrb[3])
+                u_npu.u_dma.wrapper.ext_mem[{mem_addr, 2'b00}+3] <= mem_wdata[31:24];
+        end
+    end
+
 endmodule
