@@ -75,9 +75,11 @@
             shellHook = ''
               echo "🔧 NPU Development Environment"
               echo "   RTL sim:  iverilog | verilator | cocotb"
-              echo "   Synthesis: yosys $(yosys --version 2>/dev/null || echo '')"
+              YOSYS_VER=$(yosys --version 2>/dev/null || echo "")
+              echo "   Synthesis: yosys $YOSYS_VER"
               echo "   RISC-V:    riscv32-none-elf-gcc"
-              echo "   Python:    $(python3 --version)"
+              PY_VER=$(python3 --version 2>&1)
+              echo "   Python:    $PY_VER"
             '';
 
             # Fix verilator --trace-fst zlib issue

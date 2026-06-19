@@ -26,6 +26,7 @@ obj/
 
 # --- Simulation ---
 sim_build/
+sim_build_*/
 __pycache__/
 *.pyc
 *.pyo

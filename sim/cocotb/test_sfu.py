@@ -1,0 +1,250 @@
+"""test_sfu.py — Cocotb test for NPU SFU (Special Function Unit).
+
+Tests the three activation functions (GELU, Sigmoid, Tanh) and the
+integer quantise/dequantise datapath.
+
+Each activation function is exercised with random INT8 inputs.  The
+hardware output is compared against a golden value computed from the
+same mathematical function, quantised to INT8 with the same scale
+factor that ``generate_luts.py`` uses.  Tolerance: +/-1 LSB.
+
+Pipeline latency (sfu_top): 4 cycles from valid_in to valid_out
+(input register -> interpolation -> alignment -> output mux).
+"""
+
+import cocotb
+from cocotb.clock import Clock
+from cocotb.triggers import ClockCycles, RisingEdge
+import math
+import random
+
+# ── Opcode constants (must match isa_defines.svh) ──────────────────────
+
+OP_ACT_GELU    = 0x21
+OP_ACT_SIGMOID = 0x22
+OP_ACT_TANH    = 0x23
+OP_QUANT       = 0x30
+OP_DEQUANT     = 0x31
+OP_NOP         = 0xFF
+
+SFU_LATENCY = 4        # cycles from valid_in to valid_out
+
+# ── Helper ─────────────────────────────────────────────────────────────
+
+async def reset_dut(dut):
+    """Apply synchronous reset."""
+    dut.rst_n.value = 0
+    await ClockCycles(dut.clk, 4)
+    dut.rst_n.value = 1
+    await RisingEdge(dut.clk)
+
+
+def to_signed(v, bits=8):
+    """Convert an ``n``-bit unsigned Python int to signed Python int."""
+    if v >= (1 << (bits - 1)):
+        return v - (1 << bits)
+    return v
+
+# ── Activation functions ───────────────────────────────────────────────
+
+def _gelu(x):
+    return 0.5 * x * (1.0 + math.tanh(
+        math.sqrt(2.0 / math.pi) * (x + 0.044715 * x ** 3)))
+
+def _sigmoid(x):
+    return 1.0 / (1.0 + math.exp(-x))
+
+def _tanh(x):
+    return math.tanh(x)
+
+
+def _compute_scale(fn, n=32):
+    """Compute the INT8 scale factor used by ``generate_luts.py``."""
+    xs = [-4.0 + i * 0.25 for i in range(n)]
+    ys = [fn(x) for x in xs]
+    max_abs = max(abs(y) for y in ys)
+    return 127.0 / max_abs if max_abs > 1e-8 else 1.0
+
+
+# Pre-compute scale factors (one per activation)
+_GELU_SCALE    = _compute_scale(_gelu)
+_SIGMOID_SCALE = _compute_scale(_sigmoid)
+_TANH_SCALE    = _compute_scale(_tanh)
+
+
+def _golden(x_int8, fn, scale):
+    """Compute the ideal INT8 result for *fn* applied to ``x_int8/32``."""
+    y = fn(x_int8 / 32.0)
+    q = round(y * scale)
+    return max(-128, min(127, q))
+
+
+def golden_gelu(x_int8):
+    return _golden(x_int8, _gelu, _GELU_SCALE)
+
+def golden_sigmoid(x_int8):
+    return _golden(x_int8, _sigmoid, _SIGMOID_SCALE)
+
+def golden_tanh(x_int8):
+    return _golden(x_int8, _tanh, _TANH_SCALE)
+
+
+# ── Single test runner (pipelined) ────────────────────────────────────
+
+async def _test_activation(dut, opcode, func_name, golden_fn,
+                           num_tests=80):
+    """Feed *num_tests* random INT8 values, verify each against *golden_fn*.
+
+    Because the SFU is fully pipelined, we feed one value every cycle
+    and compare the output against a software emulation of the pipeline.
+
+    Pipeline: input -> interp -> align -> mux.  Result for input[i]
+    appears at y_out while input[i+SFU_LATENCY] is being driven.
+    """
+    inputs    = [random.randint(-128, 127) for _ in range(num_tests)]
+    goldens   = [golden_fn(x) for x in inputs]
+    expected_fifo = []
+    errors        = 0
+
+    for i, x in enumerate(inputs):
+        # ── Drive ──
+        dut.opcode.value  = opcode
+        dut.x_in.value    = x & 0xFF
+        dut.valid_in.value = 1
+        await RisingEdge(dut.clk)
+
+        expected_fifo.append(goldens[i])
+
+        # ── Check (only after pipeline has filled) ──
+        # Result for input[i-SFU_LATENCY] is visible once
+        # SFU_LATENCY+1 entries are in the FIFO.
+        if len(expected_fifo) >= SFU_LATENCY + 1:
+            expected = expected_fifo.pop(0)
+            actual   = dut.y_out.value.to_signed()
+            diff     = abs(actual - expected)
+            if diff > 1:
+                errors += 1
+                if errors <= 5:
+                    dut._log.warning(
+                        f"  [{func_name}] x={inputs[i - SFU_LATENCY]}: "
+                        f"exp={expected} got={actual}  (diff={diff})")
+            assert diff <= 1, (
+                f"{func_name}: x={inputs[i - SFU_LATENCY]}: "
+                f"exp={expected} got={actual} (diff > 1 LSB)")
+
+    # ── Drain remaining pipeline entries ──
+    # SFU_LATENCY results are still in the pipeline.  Read y_out
+    # *after* each clock edge so the output register advances.
+    dut.valid_in.value = 0
+    for _ in range(SFU_LATENCY):
+        expected = expected_fifo.pop(0)
+        await RisingEdge(dut.clk)
+        actual = dut.y_out.value.to_signed()
+        diff   = abs(actual - expected)
+        assert diff <= 1, (
+            f"{func_name} drain: exp={expected} got={actual} (diff > 1)")
+
+    dut._log.info(
+        f"  {func_name}: {num_tests} inputs, "
+        f"all within +/-1 LSB")
+
+
+# ── Tests ──────────────────────────────────────────────────────────────
+
+@cocotb.test()
+async def test_sfu_gelu(dut):
+    """SFU GELU: random INT8 inputs vs math-domain golden, +/-1 LSB."""
+    clock = Clock(dut.clk, 2, unit="ns")
+    cocotb.start_soon(clock.start())
+    dut.opcode.value  = 0
+    dut.x_in.value    = 0
+    dut.zp.value      = 0
+    dut.scale_mul.value = 0
+    dut.scale_shr.value = 0
+    dut.valid_in.value = 0
+    await reset_dut(dut)
+
+    await _test_activation(dut, OP_ACT_GELU, "GELU", golden_gelu)
+
+
+@cocotb.test()
+async def test_sfu_sigmoid(dut):
+    """SFU Sigmoid: random INT8 inputs vs math-domain golden, +/-1 LSB."""
+    clock = Clock(dut.clk, 2, unit="ns")
+    cocotb.start_soon(clock.start())
+    dut.opcode.value  = 0
+    dut.x_in.value    = 0
+    dut.zp.value      = 0
+    dut.scale_mul.value = 0
+    dut.scale_shr.value = 0
+    dut.valid_in.value = 0
+    await reset_dut(dut)
+
+    await _test_activation(dut, OP_ACT_SIGMOID, "Sigmoid", golden_sigmoid)
+
+
+@cocotb.test()
+async def test_sfu_tanh(dut):
+    """SFU Tanh: random INT8 inputs vs math-domain golden, +/-1 LSB."""
+    clock = Clock(dut.clk, 2, unit="ns")
+    cocotb.start_soon(clock.start())
+    dut.opcode.value  = 0
+    dut.x_in.value    = 0
+    dut.zp.value      = 0
+    dut.scale_mul.value = 0
+    dut.scale_shr.value = 0
+    dut.valid_in.value = 0
+    await reset_dut(dut)
+
+    await _test_activation(dut, OP_ACT_TANH, "Tanh", golden_tanh)
+
+
+@cocotb.test()
+async def test_sfu_quant_dequant(dut):
+    """SFU quant/dequant: verify identity and constant-scale paths."""
+    clock = Clock(dut.clk, 2, unit="ns")
+    cocotb.start_soon(clock.start())
+    dut.valid_in.value = 0
+    await reset_dut(dut)
+
+    vectors = [
+        # (opcode, x, zp, scale_mul, scale_shr, description, ref_fn)
+        (OP_DEQUANT,  42, 0,   1,   0, "dequant identity",  lambda x, zp, sm, ss: x),
+        (OP_DEQUANT,  -5, 0,   1,   0, "dequant neg",       lambda x, zp, sm, ss: x),
+        (OP_DEQUANT,  42, 10,  1,   0, "dequant sub zp",    lambda x, zp, sm, ss: x - zp),
+        (OP_DEQUANT,  42, 0,   2,   1, "dequant mul>>",     lambda x, zp, sm, ss: (x - zp) * sm >> ss),
+        (OP_QUANT,    42, 0,   1,   0, "quant identity",    lambda x, zp, sm, ss: max(-128, min(127, x + zp))),
+        (OP_QUANT,   -10, 0,   1,   0, "quant neg",         lambda x, zp, sm, ss: max(-128, min(127, x + zp))),
+        (OP_QUANT,    42, 20,  1,   0, "quant add zp",      lambda x, zp, sm, ss: max(-128, min(127, x + zp))),
+        (OP_QUANT,   100, 0,   2,   1, "quant scale identity", lambda x, zp, sm, ss: max(-128, min(127, round(x * sm / (1 << ss)) + zp))),
+    ]
+
+    for opcode, x, zp, sm, ss, desc, ref_fn in vectors:
+        # Drive
+        dut.opcode.value    = opcode
+        dut.x_in.value      = x & 0xFF
+        dut.zp.value        = zp
+        dut.scale_mul.value = sm
+        dut.scale_shr.value = ss
+        dut.valid_in.value  = 1
+        await RisingEdge(dut.clk)
+
+        # Expected
+        expected = ref_fn(x, zp, sm, ss)
+        # Saturate to INT8
+        expected = max(-128, min(127, expected))
+
+        # Wait for pipeline (SFU_LATENCY cycles from the drive edge)
+        # We already advanced 1 edge above; need SFU_LATENCY-1 more.
+        # *Then* read y_out (after the output register has clocked).
+        dut.valid_in.value = 0
+        for _ in range(SFU_LATENCY):
+            await RisingEdge(dut.clk)
+
+        actual = dut.y_out.value.to_signed()
+        diff   = abs(actual - expected)
+        assert diff <= 1, (
+            f"{desc}: x={x} zp={zp} sm={sm} ss={ss}: "
+            f"exp={expected} got={actual} (diff={diff})")
+
+    dut._log.info("  quant/dequant: all vectors PASS")
