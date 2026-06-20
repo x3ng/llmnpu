@@ -131,53 +131,57 @@ define build_fw
 	riscv32-none-elf-objcopy -O binary $(REPO_ROOT)/build/$(1).elf $(REPO_ROOT)/build/$(1).bin
 	@python3 -c "import sys; data=open('$(REPO_ROOT)/build/$(1).bin','rb').read(); data+=b'\x00'*(-len(data)%4); [print(f'{int.from_bytes(data[i:i+4],\"little\"):08x}') for i in range(0,len(data),4)]" > $(REPO_ROOT)/build/$(1).hex
 	@mkdir -p $(SIM_BUILD)/sim/verilog
-	cp $(REPO_ROOT)/build/$(1).hex $(SIM_BUILD)/sim/verilog/firmware.hex
+	cp $(REPO_ROOT)/build/$(1).hex $(SIM_BUILD)/sim/verilog/$(1).hex
+	@mkdir -p $(PWD)/sim/verilog
+	cp $(REPO_ROOT)/build/$(1).hex $(PWD)/sim/verilog/firmware.hex
 endef
 
 # ── E2E Stage 1: CPU Boot ──
 
 test_e2e_boot: SIM_BUILD = sim_build_boot
-test_e2e_boot: export COMPILE_ARGS := $(COMPILE_ARGS) -Pext_mem_model.HEX_FILE="$(SIM_BUILD)/sim/verilog/firmware.hex"
 test_e2e_boot:
 	@rm -rf $(SIM_BUILD)
 	$(call build_fw,fw_boot,$(PWD)/cocotb/firmware_boot.c)
 	PYTHONPATH=$(PWD)/cocotb:$$PYTHONPATH \
 	MODULE=test_e2e_boot TOPLEVEL=top_soc \
 	VERILOG_SOURCES="$(E2E_RTL)" \
-	$(MAKE) 2>&1 | tee $(SIM_BUILD)/test.log
+	$(MAKE) COMPILE_ARGS='-I$(REPO_ROOT)/rtl/include -Pext_mem_model.HEX_FILE=$(SIM_BUILD)/sim/verilog/fw_boot.hex' 2>&1 | tee $(SIM_BUILD)/test.log
 
 # ── E2E Stage 2: CSR ──
 
 test_e2e_csr: SIM_BUILD = sim_build_csr
-test_e2e_csr: export COMPILE_ARGS := $(COMPILE_ARGS) -Pext_mem_model.HEX_FILE="$(SIM_BUILD)/sim/verilog/firmware.hex"
 test_e2e_csr:
 	@rm -rf $(SIM_BUILD)
 	$(call build_fw,firmware_csr,$(PWD)/cocotb/firmware_csr.c)
 	PYTHONPATH=$(PWD)/cocotb:$$PYTHONPATH \
 	MODULE=test_e2e_csr TOPLEVEL=top_soc \
 	VERILOG_SOURCES="$(E2E_RTL)" \
-	$(MAKE) 2>&1 | tee $(SIM_BUILD)/test.log
+	$(MAKE) COMPILE_ARGS='-I$(REPO_ROOT)/rtl/include -Pext_mem_model.HEX_FILE=$(SIM_BUILD)/sim/verilog/firmware_csr.hex' 2>&1 | tee $(SIM_BUILD)/test.log
 
 # ── E2E Stage 3: DMA ──
 
 test_e2e_dma: SIM_BUILD = sim_build_e2e_dma
-test_e2e_dma: export COMPILE_ARGS := $(COMPILE_ARGS) -Pext_mem_model.HEX_FILE="$(SIM_BUILD)/sim/verilog/firmware.hex"
 test_e2e_dma:
 	@rm -rf $(SIM_BUILD)
 	$(call build_fw,firmware_dma,$(PWD)/cocotb/firmware_dma.c,-std=gnu99)
 	PYTHONPATH=$(PWD)/cocotb:$$PYTHONPATH \
 	MODULE=test_e2e_dma TOPLEVEL=top_soc \
 	VERILOG_SOURCES="$(E2E_RTL)" \
-	$(MAKE) 2>&1 | tee $(SIM_BUILD)/test.log
+	$(MAKE) COMPILE_ARGS='-I$(REPO_ROOT)/rtl/include -Pext_mem_model.HEX_FILE=$(SIM_BUILD)/sim/verilog/firmware_dma.hex' 2>&1 | tee $(SIM_BUILD)/test.log
 
 # ── E2E Stage 4: GEMM (Verilator) ──
 
 test_e2e_gemm: SIM_BUILD = sim_build_e2e_gemm
 test_e2e_gemm: SIM = verilator
 test_e2e_gemm: EXTRA_ARGS = -Wno-fatal
-test_e2e_gemm: export COMPILE_ARGS := $(COMPILE_ARGS) -I$(REPO_ROOT)/ref/picorv32 -Pext_mem_model.HEX_FILE="$(SIM_BUILD)/sim/verilog/firmware.hex"
 test_e2e_gemm:
 	@rm -rf $(SIM_BUILD)
+	@# Guard: GEMM requires Verilator; refuse if vvp is running
+	@if ps aux | grep -q '[v]vp'; then \
+		echo "ERROR: vvp process detected but GEMM target expects Verilator."; \
+		echo "Stop any running Icarus simulations first (kill \`ps aux | grep vvp\`)."; \
+		exit 1; \
+	fi
 	@python3 $(REPO_ROOT)/tools/codegen/generate_golden.py --header > $(REPO_ROOT)/build/golden_gemm.h
 	$(call build_fw,firmware_gemm, \
 		$(PWD)/cocotb/firmware_gemm.c, \
@@ -197,16 +201,17 @@ test_e2e_gemm:
 	riscv32-none-elf-objcopy -O binary $(REPO_ROOT)/build/firmware_gemm.elf $(REPO_ROOT)/build/firmware_gemm.bin
 	@python3 -c "import sys; data=open('$(REPO_ROOT)/build/firmware_gemm.bin','rb').read(); data+=b'\x00'*(-len(data)%4); [print(f'{int.from_bytes(data[i:i+4],\"little\"):08x}') for i in range(0,len(data),4)]" > $(REPO_ROOT)/build/firmware_gemm.hex
 	@mkdir -p $(SIM_BUILD)/sim/verilog
-	cp $(REPO_ROOT)/build/firmware_gemm.hex $(SIM_BUILD)/sim/verilog/firmware.hex
+	cp $(REPO_ROOT)/build/firmware_gemm.hex $(SIM_BUILD)/sim/verilog/firmware_gemm.hex
+	@mkdir -p $(PWD)/sim/verilog
+	cp $(REPO_ROOT)/build/firmware_gemm.hex $(PWD)/sim/verilog/firmware.hex
 	PYTHONPATH=$(PWD)/cocotb:$$PYTHONPATH \
 	MODULE=test_e2e_gemm TOPLEVEL=top_soc \
 	VERILOG_SOURCES="$(E2E_RTL)" \
-	$(MAKE) SIM=$(SIM) EXTRA_ARGS="$(EXTRA_ARGS)" 2>&1 | tee $(SIM_BUILD)/test.log
+	$(MAKE) SIM=$(SIM) EXTRA_ARGS="$(EXTRA_ARGS)" COMPILE_ARGS='-I$(REPO_ROOT)/rtl/include -Pext_mem_model.HEX_FILE=$(SIM_BUILD)/sim/verilog/firmware_gemm.hex' 2>&1 | tee $(SIM_BUILD)/test.log
 
 # ── E2E Full SoC Integration ──
 
 test_e2e: SIM_BUILD = sim_build_e2e
-test_e2e: export COMPILE_ARGS := $(COMPILE_ARGS) -Pext_mem_model.HEX_FILE="$(SIM_BUILD)/sim/verilog/firmware.hex"
 test_e2e:
 	@rm -rf $(SIM_BUILD)
 	@python3 $(REPO_ROOT)/tools/codegen/generate_golden.py --header > $(REPO_ROOT)/build/golden_gemm.h
@@ -228,11 +233,13 @@ test_e2e:
 	riscv32-none-elf-objcopy -O binary $(REPO_ROOT)/build/firmware_e2e.elf $(REPO_ROOT)/build/firmware_e2e.bin
 	@python3 -c "import sys; data=open('$(REPO_ROOT)/build/firmware_e2e.bin','rb').read(); data+=b'\x00'*(-len(data)%4); [print(f'{int.from_bytes(data[i:i+4],\"little\"):08x}') for i in range(0,len(data),4)]" > $(REPO_ROOT)/build/firmware_e2e.hex
 	@mkdir -p $(SIM_BUILD)/sim/verilog
-	cp $(REPO_ROOT)/build/firmware_e2e.hex $(SIM_BUILD)/sim/verilog/firmware.hex
+	cp $(REPO_ROOT)/build/firmware_e2e.hex $(SIM_BUILD)/sim/verilog/firmware_e2e.hex
+	@mkdir -p $(PWD)/sim/verilog
+	cp $(REPO_ROOT)/build/firmware_e2e.hex $(PWD)/sim/verilog/firmware.hex
 	PYTHONPATH=$(PWD)/cocotb:$$PYTHONPATH \
 	MODULE=test_e2e TOPLEVEL=top_soc \
 	VERILOG_SOURCES="$(E2E_RTL)" \
-	$(MAKE) 2>&1 | tee $(SIM_BUILD)/test.log
+	$(MAKE) COMPILE_ARGS='-I$(REPO_ROOT)/rtl/include -Pext_mem_model.HEX_FILE=$(SIM_BUILD)/sim/verilog/firmware_e2e.hex' 2>&1 | tee $(SIM_BUILD)/test.log
 
 # ── Batch targets ──
 
