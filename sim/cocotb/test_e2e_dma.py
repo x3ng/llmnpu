@@ -86,6 +86,9 @@ async def wait_uart_chars(dut, count=1, timeout_cycles=TIMEOUT_CYCLES, log=None)
                 if log:
                     log.info(f"UART_TX[{len(result)-1}] = 0x{val:02X} "
                              f"('{chr(val)}') at cycle {cyc}")
+                # If we see 'T' (DMA timeout), dump bridge state
+                if val == 0x54:  # 'T'
+                    await dump_diagnostics(dut, "dma-timeout-T")
                 if len(result) >= count:
                     return result
         last_val = val

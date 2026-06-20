@@ -97,20 +97,35 @@ module crossbar (
     // ====== Per-master grant signals ======
     // Combinational — a master is granted when the slave it targets
     // grants access to that master.
-    assign m0_grant = m0_req && slv0_gv && (m0_slv_id == 0 ? slv0_gm == 0 :
-                                             m0_slv_id == 1 ? slv1_gm == 0 :
-                                             m0_slv_id == 2 ? slv2_gm == 0 :
-                                             m0_slv_id == 3 ? slv3_gm == 0 : 1'b0);
+    assign m0_grant = m0_req &&
+        (m0_slv_id == 0 ? slv0_gv :
+         m0_slv_id == 1 ? slv1_gv :
+         m0_slv_id == 2 ? slv2_gv :
+         m0_slv_id == 3 ? slv3_gv : 1'b0) &&
+        (m0_slv_id == 0 ? slv0_gm == 0 :
+         m0_slv_id == 1 ? slv1_gm == 0 :
+         m0_slv_id == 2 ? slv2_gm == 0 :
+         m0_slv_id == 3 ? slv3_gm == 0 : 1'b0);
 
-    assign m1_grant = m1_req && slv1_gv && (m1_slv_id == 0 ? slv0_gm == 1 :
-                                             m1_slv_id == 1 ? slv1_gm == 1 :
-                                             m1_slv_id == 2 ? slv2_gm == 1 :
-                                             m1_slv_id == 3 ? slv3_gm == 1 : 1'b0);
+    assign m1_grant = m1_req &&
+        (m1_slv_id == 0 ? slv0_gv :
+         m1_slv_id == 1 ? slv1_gv :
+         m1_slv_id == 2 ? slv2_gv :
+         m1_slv_id == 3 ? slv3_gv : 1'b0) &&
+        (m1_slv_id == 0 ? slv0_gm == 1 :
+         m1_slv_id == 1 ? slv1_gm == 1 :
+         m1_slv_id == 2 ? slv2_gm == 1 :
+         m1_slv_id == 3 ? slv3_gm == 1 : 1'b0);
 
-    assign m2_grant = m2_req && slv2_gv && (m2_slv_id == 0 ? slv0_gm == 2 :
-                                             m2_slv_id == 1 ? slv1_gm == 2 :
-                                             m2_slv_id == 2 ? slv2_gm == 2 :
-                                             m2_slv_id == 3 ? slv3_gm == 2 : 1'b0);
+    assign m2_grant = m2_req &&
+        (m2_slv_id == 0 ? slv0_gv :
+         m2_slv_id == 1 ? slv1_gv :
+         m2_slv_id == 2 ? slv2_gv :
+         m2_slv_id == 3 ? slv3_gv : 1'b0) &&
+        (m2_slv_id == 0 ? slv0_gm == 2 :
+         m2_slv_id == 1 ? slv1_gm == 2 :
+         m2_slv_id == 2 ? slv2_gm == 2 :
+         m2_slv_id == 3 ? slv3_gm == 2 : 1'b0);
 
     // ====== Route granted master signals to each slave ======
     wire [15:0] slv0_addr, slv1_addr, slv2_addr, slv3_addr;

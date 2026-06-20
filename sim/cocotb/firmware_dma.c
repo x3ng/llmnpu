@@ -188,7 +188,7 @@ void main(void)
         unsigned int c1;
         unsigned int c2;
         c1 = csr[0x20u];   // PERF_CYCLE at word offset 0x20 (byte 0x80)
-        {volatile int d; for (d = 0; d < 100; d++) __asm__ volatile ("");}
+        {volatile int d; for (d = 0; d < 10; d++) __asm__ volatile ("");}
         c2 = csr[0x20u];
         if (c2 <= c1) errors++;
     }
@@ -217,7 +217,7 @@ void main(void)
 
         // Wait for BUSY to de-assert
         {
-            volatile unsigned int to = 50000u;
+            volatile unsigned int to = 1000u;
             while (*csr_status & 1u) {
                 if (--to == 0) {
                     uart_putc('T');
@@ -229,7 +229,7 @@ void main(void)
         }
 
         // Add bridge delay (the hardware bridge copies DMA→SRAM after dma_done)
-        {volatile int d; for (d = 0; d < 1000; d++) __asm__ volatile ("");}
+        {volatile int d; for (d = 0; d < 10; d++) __asm__ volatile ("");}
 
         // Verify CSR_STATUS is clean
         if (!(*csr_status & 1u)) {

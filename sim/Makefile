@@ -4,7 +4,7 @@
 TOPLEVEL_LANG = verilog
 SIM ?= icarus
 
-REPO_ROOT = $(abspath $(PWD)/..)
+REPO_ROOT = $(abspath $(CURDIR)/..)
 
 COMPILE_ARGS = -I$(REPO_ROOT)/rtl/include
 SIM_ARGS =
@@ -180,7 +180,9 @@ test_e2e_dma:
 
 test_e2e_gemm: SIM_BUILD = sim_build_e2e_gemm
 test_e2e_gemm: SIM = verilator
-test_e2e_gemm: EXTRA_ARGS = -Wno-fatal
+# EXTRA_ARGS is hardcoded in the $(MAKE) line below to avoid
+# target-specific variable scoping issues with recursive make.
+GEMM_EXTRA_ARGS = -Wno-fatal -Wno-CASEINCOMPLETE -Wno-PINMISSING -Wno-TIMESCALEMOD -Wno-CASEOVERLAP -Wno-WIDTHEXPAND -Wno-WIDTHTRUNC
 test_e2e_gemm:
 	@rm -rf $(SIM_BUILD)
 	@# Guard: GEMM requires Verilator; refuse if vvp is running
@@ -218,8 +220,8 @@ test_e2e_gemm:
 	PYTHONPATH=$(PWD)/cocotb:$$PYTHONPATH \
 	MODULE=test_e2e_gemm TOPLEVEL=top_soc \
 	VERILOG_SOURCES="$(E2E_RTL)" \
-	VERILOG_INCLUDE_DIRS="$(REPO_ROOT)/rtl/include" \
-	$(MAKE) SIM=$(SIM) EXTRA_ARGS="$(EXTRA_ARGS) +define+HEX_FILE=$(SIM_BUILD)/sim/verilog/firmware_gemm.hex" 2>&1 | tee $(SIM_BUILD)/test.log
+	COMPILE_ARGS="-I$(REPO_ROOT)/rtl/include -f $(SIM_BUILD)/hex_def.f" \
+	$(MAKE) SIM=verilator EXTRA_ARGS="$(GEMM_EXTRA_ARGS)" 2>&1 | tee $(SIM_BUILD)/test.log
 
 # ── E2E Full SoC Integration ──
 
