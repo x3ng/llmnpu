@@ -796,11 +796,19 @@ module npu_top #(
     // ================================================================
     // Global busy aggregation
     // ================================================================
-    assign npu_busy = gemm_busy || valu_busy || sfu_busy || dma_busy;
+    // The DMA bridge FSM (COPY/PREFILL) runs after the DMA engine's
+    // dma_done pulse to copy data between DMA-internal SRAM and
+    // crossbar SRAM banks.  It must be reflected in npu_busy so that
+    // firmware does not start the next DMA before the bridge finishes.
+    logic bridge_busy;
+    assign bridge_busy = (dma_br_state != DMA_BR_IDLE);
+
+    assign npu_busy = gemm_busy || valu_busy || sfu_busy || dma_busy || bridge_busy;
 
     assign npu_going_idle = (gemm_busy && gemm_done)  ||
                             (valu_busy && valu_done)  ||
                             (dma_busy  && dma_done)   ||
-                            (sfu_busy  && sfu_valid_out);
+                            (sfu_busy  && sfu_valid_out) ||
+                            (bridge_busy && dma_br_next == DMA_BR_IDLE);
 
 endmodule
