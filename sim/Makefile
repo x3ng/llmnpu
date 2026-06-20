@@ -132,6 +132,7 @@ define build_fw
 	@python3 -c "import sys; data=open('$(REPO_ROOT)/build/$(1).bin','rb').read(); data+=b'\x00'*(-len(data)%4); [print(f'{int.from_bytes(data[i:i+4],\"little\"):08x}') for i in range(0,len(data),4)]" > $(REPO_ROOT)/build/$(1).hex
 	@mkdir -p $(SIM_BUILD)/sim/verilog
 	cp $(REPO_ROOT)/build/$(1).hex $(SIM_BUILD)/sim/verilog/$(1).hex
+	cp $(REPO_ROOT)/build/$(1).hex $(SIM_BUILD)/sim/verilog/firmware.hex
 	@mkdir -p $(PWD)/sim/verilog
 	cp $(REPO_ROOT)/build/$(1).hex $(PWD)/sim/verilog/firmware.hex
 endef
