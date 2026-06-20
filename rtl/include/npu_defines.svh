@@ -51,4 +51,10 @@ typedef logic [31:0] uint32_t;
 `define AXI_ADDR_WIDTH  32
 `define AXI_ID_WIDTH    4
 
+// --- Firmware hex file path (iverilog cannot bind string params across modules) ---
+// Default path; override at compile time with +define+HEX_FILE=\"...\"
+`ifndef HEX_FILE
+`define HEX_FILE "sim/verilog/firmware.hex"
+`endif
+
 `endif // NPU_DEFINES_SVH

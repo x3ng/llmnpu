@@ -13,7 +13,6 @@
 `include "npu_defines.svh"
 
 module ext_mem_model #(
-    parameter string HEX_FILE = "sim/verilog/firmware.hex",
     parameter int    MEM_WORDS = 64 * 1024 * 1024 / 4    // 16 M words
 ) (
     input  logic        clk,
@@ -54,7 +53,7 @@ module ext_mem_model #(
             mem[i] = 32'd0;
 
         // Load firmware — non-fatal if file missing
-        $readmemh(HEX_FILE, mem);
+        $readmemh(`HEX_FILE, mem);
     end
 
     // ================================================================

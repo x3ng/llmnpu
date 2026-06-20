@@ -17,9 +17,7 @@
 `include "npu_defines.svh"
 `include "isa_defines.svh"
 
-module top_soc #(
-    parameter string HEX_FILE = "sim/verilog/firmware.hex"
-) (
+module top_soc (
     input  logic        clk,
     input  logic        rst_n,
 
@@ -281,9 +279,7 @@ module top_soc #(
     // ============================================================
     // External DRAM Model (64 MB)
     // ============================================================
-    ext_mem_model #(
-        .HEX_FILE(HEX_FILE)
-    ) u_dram (
+    ext_mem_model u_dram (
         .clk,
         .rst_n,
         .req        (mem_req),

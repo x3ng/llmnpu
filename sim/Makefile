@@ -133,6 +133,9 @@ define build_fw
 	@mkdir -p $(SIM_BUILD)/sim/verilog
 	cp $(REPO_ROOT)/build/$(1).hex $(SIM_BUILD)/sim/verilog/$(1).hex
 	cp $(REPO_ROOT)/build/$(1).hex $(SIM_BUILD)/sim/verilog/firmware.hex
+	@# Generate iverilog command-line file overriding HEX_FILE to per-build path
+	@printf '+define+HEX_FILE="%s/sim/verilog/firmware.hex"\n' "$(SIM_BUILD)" > $(SIM_BUILD)/hex_def.f
+	@# Fallback: copy to shared location for standalone/test runs
 	@mkdir -p $(PWD)/sim/verilog
 	cp $(REPO_ROOT)/build/$(1).hex $(PWD)/sim/verilog/firmware.hex
 endef
@@ -146,6 +149,7 @@ test_e2e_boot:
 	PYTHONPATH=$(PWD)/cocotb:$$PYTHONPATH \
 	MODULE=test_e2e_boot TOPLEVEL=top_soc \
 	VERILOG_SOURCES="$(E2E_RTL)" \
+	COMPILE_ARGS="-I$(REPO_ROOT)/rtl/include -f $(SIM_BUILD)/hex_def.f" \
 	$(MAKE) 2>&1 | tee $(SIM_BUILD)/test.log
 
 # ── E2E Stage 2: CSR ──
@@ -157,6 +161,7 @@ test_e2e_csr:
 	PYTHONPATH=$(PWD)/cocotb:$$PYTHONPATH \
 	MODULE=test_e2e_csr TOPLEVEL=top_soc \
 	VERILOG_SOURCES="$(E2E_RTL)" \
+	COMPILE_ARGS="-I$(REPO_ROOT)/rtl/include -f $(SIM_BUILD)/hex_def.f" \
 	$(MAKE) 2>&1 | tee $(SIM_BUILD)/test.log
 
 # ── E2E Stage 3: DMA ──
@@ -168,6 +173,7 @@ test_e2e_dma:
 	PYTHONPATH=$(PWD)/cocotb:$$PYTHONPATH \
 	MODULE=test_e2e_dma TOPLEVEL=top_soc \
 	VERILOG_SOURCES="$(E2E_RTL)" \
+	COMPILE_ARGS="-I$(REPO_ROOT)/rtl/include -f $(SIM_BUILD)/hex_def.f" \
 	$(MAKE) 2>&1 | tee $(SIM_BUILD)/test.log
 
 # ── E2E Stage 4: GEMM (Verilator) ──
@@ -206,13 +212,14 @@ test_e2e_gemm:
 	@python3 -c "import sys; data=open('$(REPO_ROOT)/build/firmware_gemm.bin','rb').read(); data+=b'\x00'*(-len(data)%4); [print(f'{int.from_bytes(data[i:i+4],\"little\"):08x}') for i in range(0,len(data),4)]" > $(REPO_ROOT)/build/firmware_gemm.hex
 	@mkdir -p $(SIM_BUILD)/sim/verilog
 	cp $(REPO_ROOT)/build/firmware_gemm.hex $(SIM_BUILD)/sim/verilog/firmware_gemm.hex
+	@printf '+define+HEX_FILE="%s/sim/verilog/firmware_gemm.hex"\n' "$(SIM_BUILD)" > $(SIM_BUILD)/hex_def.f
 	@mkdir -p $(PWD)/sim/verilog
 	cp $(REPO_ROOT)/build/firmware_gemm.hex $(PWD)/sim/verilog/firmware.hex
 	PYTHONPATH=$(PWD)/cocotb:$$PYTHONPATH \
 	MODULE=test_e2e_gemm TOPLEVEL=top_soc \
 	VERILOG_SOURCES="$(E2E_RTL)" \
 	VERILOG_INCLUDE_DIRS="$(REPO_ROOT)/rtl/include" \
-	$(MAKE) SIM=$(SIM) EXTRA_ARGS="$(EXTRA_ARGS)" 2>&1 | tee $(SIM_BUILD)/test.log
+	$(MAKE) SIM=$(SIM) EXTRA_ARGS="$(EXTRA_ARGS) +define+HEX_FILE=$(SIM_BUILD)/sim/verilog/firmware_gemm.hex" 2>&1 | tee $(SIM_BUILD)/test.log
 
 # ── E2E Full SoC Integration ──
 
@@ -239,11 +246,13 @@ test_e2e:
 	@python3 -c "import sys; data=open('$(REPO_ROOT)/build/firmware_e2e.bin','rb').read(); data+=b'\x00'*(-len(data)%4); [print(f'{int.from_bytes(data[i:i+4],\"little\"):08x}') for i in range(0,len(data),4)]" > $(REPO_ROOT)/build/firmware_e2e.hex
 	@mkdir -p $(SIM_BUILD)/sim/verilog
 	cp $(REPO_ROOT)/build/firmware_e2e.hex $(SIM_BUILD)/sim/verilog/firmware_e2e.hex
+	@printf '+define+HEX_FILE="%s/sim/verilog/firmware.hex"\n' "$(SIM_BUILD)" > $(SIM_BUILD)/hex_def.f
 	@mkdir -p $(PWD)/sim/verilog
 	cp $(REPO_ROOT)/build/firmware_e2e.hex $(PWD)/sim/verilog/firmware.hex
 	PYTHONPATH=$(PWD)/cocotb:$$PYTHONPATH \
 	MODULE=test_e2e TOPLEVEL=top_soc \
 	VERILOG_SOURCES="$(E2E_RTL)" \
+	COMPILE_ARGS="-I$(REPO_ROOT)/rtl/include -f $(SIM_BUILD)/hex_def.f" \
 	$(MAKE) 2>&1 | tee $(SIM_BUILD)/test.log
 
 # ── Batch targets ──
