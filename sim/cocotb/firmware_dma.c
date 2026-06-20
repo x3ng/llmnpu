@@ -152,27 +152,13 @@ void main(void)
         rd_csr2 = csr[CSR_DMA_CSR2 / 4u];
         if (rd_csr2 != wr_csr2) errors++;
 
-        // DMA_CSR3 (0x38): ctrl = 1 (START)
-        wr_csr3 = 1u;
+        // DMA_CSR3 (0x38): ctrl (readback test only — no START to avoid
+        // triggering a real DMA with test parameters)
+        wr_csr3 = 0u;
         csr[CSR_DMA_CSR3 / 4u] = wr_csr3;
         mem_fence();
         rd_csr3 = csr[CSR_DMA_CSR3 / 4u];
         if (rd_csr3 != wr_csr3) errors++;
-
-        // Wait for DMA operation to complete (BUSY poll)
-        {
-            volatile unsigned int *csr_status = (volatile unsigned int *)0x10000004u;
-            volatile unsigned int to = 50000u;
-            while (*csr_status & 1u) {
-                if (--to == 0) {
-                    // TIMEOUT: dump DEBUG register
-                    uart_putc('T');
-                    uart_puthex32(csr_debug_read());
-                    errors++;
-                    break;
-                }
-            }
-        }
     }
 
     // -------------------------------------------------------

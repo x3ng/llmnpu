@@ -146,7 +146,7 @@ test_e2e_boot:
 	PYTHONPATH=$(PWD)/cocotb:$$PYTHONPATH \
 	MODULE=test_e2e_boot TOPLEVEL=top_soc \
 	VERILOG_SOURCES="$(E2E_RTL)" \
-	$(MAKE) COMPILE_ARGS='-I$(REPO_ROOT)/rtl/include' 2>&1 | tee $(SIM_BUILD)/test.log
+	$(MAKE) 2>&1 | tee $(SIM_BUILD)/test.log
 
 # ── E2E Stage 2: CSR ──
 
@@ -157,7 +157,7 @@ test_e2e_csr:
 	PYTHONPATH=$(PWD)/cocotb:$$PYTHONPATH \
 	MODULE=test_e2e_csr TOPLEVEL=top_soc \
 	VERILOG_SOURCES="$(E2E_RTL)" \
-	$(MAKE) COMPILE_ARGS='-I$(REPO_ROOT)/rtl/include' 2>&1 | tee $(SIM_BUILD)/test.log
+	$(MAKE) 2>&1 | tee $(SIM_BUILD)/test.log
 
 # ── E2E Stage 3: DMA ──
 
@@ -168,7 +168,7 @@ test_e2e_dma:
 	PYTHONPATH=$(PWD)/cocotb:$$PYTHONPATH \
 	MODULE=test_e2e_dma TOPLEVEL=top_soc \
 	VERILOG_SOURCES="$(E2E_RTL)" \
-	$(MAKE) COMPILE_ARGS='-I$(REPO_ROOT)/rtl/include' 2>&1 | tee $(SIM_BUILD)/test.log
+	$(MAKE) 2>&1 | tee $(SIM_BUILD)/test.log
 
 # ── E2E Stage 4: GEMM (Verilator) ──
 
@@ -211,7 +211,8 @@ test_e2e_gemm:
 	PYTHONPATH=$(PWD)/cocotb:$$PYTHONPATH \
 	MODULE=test_e2e_gemm TOPLEVEL=top_soc \
 	VERILOG_SOURCES="$(E2E_RTL)" \
-	$(MAKE) SIM=$(SIM) EXTRA_ARGS="$(EXTRA_ARGS)" COMPILE_ARGS='-I$(REPO_ROOT)/rtl/include' 2>&1 | tee $(SIM_BUILD)/test.log
+	VERILOG_INCLUDE_DIRS="$(REPO_ROOT)/rtl/include" \
+	$(MAKE) SIM=$(SIM) EXTRA_ARGS="$(EXTRA_ARGS)" 2>&1 | tee $(SIM_BUILD)/test.log
 
 # ── E2E Full SoC Integration ──
 
@@ -243,7 +244,7 @@ test_e2e:
 	PYTHONPATH=$(PWD)/cocotb:$$PYTHONPATH \
 	MODULE=test_e2e TOPLEVEL=top_soc \
 	VERILOG_SOURCES="$(E2E_RTL)" \
-	$(MAKE) COMPILE_ARGS='-I$(REPO_ROOT)/rtl/include' 2>&1 | tee $(SIM_BUILD)/test.log
+	$(MAKE) 2>&1 | tee $(SIM_BUILD)/test.log
 
 # ── Batch targets ──
 
