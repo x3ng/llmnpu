@@ -13,6 +13,7 @@ The firmware outputs a diagnostic sequence on UART TX:
 """
 
 import cocotb
+import os
 from cocotb.clock import Clock
 from cocotb.triggers import RisingEdge, Timer, ClockCycles
 
@@ -50,12 +51,53 @@ async def wait_uart_all(dut, max_chars=64, timeout_cycles=2000000,
     """Capture all UART characters until the line goes idle for `idle_cycles`.
     Returns list of captured byte values.
     """
+    def result_complete(buf):
+        if ord('P') in buf:
+            return True
+        for pos, byte in enumerate(buf):
+            if byte == ord('F') and pos + 1 < len(buf):
+                detail_count = min(buf[pos + 1], 4)
+                return len(buf) >= pos + 2 + detail_count * 5
+        return False
+
     result = []
     last_val = int(dut.uart_tx.value)
     idle_count = 0
+    result_seen_idle_cycles = 20000
+    have_uart_strobe = all(
+        hasattr(dut, name)
+        for name in ("periph_req", "periph_write", "periph_addr", "periph_wdata")
+    )
     for cyc in range(timeout_cycles):
         await RisingEdge(dut.clk)
         await Timer(1, unit="ps")
+
+        if have_uart_strobe:
+            try:
+                saw_strobe = False
+                if (int(dut.periph_req.value)
+                        and int(dut.periph_write.value)
+                        and int(dut.periph_addr.value) == 0x00000008):
+                    saw_strobe = True
+                    val = int(dut.periph_wdata.value) & 0xFF
+                    if val != 0:
+                        result.append(val)
+                        if log:
+                            c = chr(val) if 0x20 <= val < 0x7F else '?'
+                            log.info(f"UART_WR[{len(result)-1}] = 0x{val:02X} ('{c}') at cycle {cyc}")
+                        idle_count = 0
+                        if len(result) >= max_chars or result_complete(result):
+                            return result
+                if not saw_strobe:
+                    idle_count += 1
+                    if ord('F') in result and idle_count >= result_seen_idle_cycles:
+                        return result
+                    if len(result) > 0 and idle_count >= idle_cycles:
+                        return result
+                continue
+            except Exception:
+                have_uart_strobe = False
+
         val = int(dut.uart_tx.value)
         if val != last_val:
             if val != 0:
@@ -64,11 +106,13 @@ async def wait_uart_all(dut, max_chars=64, timeout_cycles=2000000,
                     c = chr(val) if 0x20 <= val < 0x7F else '?'
                     log.info(f"UART_TX[{len(result)-1}] = 0x{val:02X} ('{c}') at cycle {cyc}")
                 idle_count = 0
-                if len(result) >= max_chars:
+                if len(result) >= max_chars or result_complete(result):
                     return result
             last_val = val
         else:
             idle_count += 1
+            if ord('F') in result and idle_count >= result_seen_idle_cycles:
+                return result
             if len(result) > 0 and idle_count >= idle_cycles:
                 return result
     return result
@@ -222,21 +266,6 @@ async def test_e2e_gemm_pass(dut):
     The firmware outputs a diagnostic sequence on UART.  We parse it
     to identify exactly where the pipeline fails.
     """
-    # ── Ensure correct firmware.hex is loaded ─────────────────────────
-    # The ext_mem_model loads "sim/verilog/firmware.hex" relative to
-    # the simulator CWD (the sim/ directory).  The Makefile copies the
-    # fresh hex to sim_build_e2e_gemm/sim/verilog/firmware.hex, but the
-    # simulator looks in sim/verilog/firmware.hex (the stale one).
-    # Fix: overwrite the stale location with the correct build artefact.
-    import shutil, os as _os2
-    repo_root = _os2.path.abspath(_os2.path.join(_os2.path.dirname(__file__), "..", ".."))
-    src_hex   = _os2.path.join(repo_root, "build", "firmware.hex")
-    dst_hex   = _os2.path.join(repo_root, "sim", "verilog", "firmware.hex")
-    _os2.makedirs(_os2.path.dirname(dst_hex), exist_ok=True)
-    shutil.copy2(src_hex, dst_hex)
-    dut._log.info(f"[SETUP] Copied {src_hex} -> {dst_hex} "
-                  f"({_os2.path.getsize(src_hex)} bytes)")
-
     # ── Clock ─────────────────────────────────────────────────────────
     clock = Clock(dut.clk, 10, unit="ns")
     cocotb.start_soon(clock.start())
@@ -384,14 +413,143 @@ async def test_e2e_gemm_pass(dut):
                 # nothing happening for a while — might be done
                 pass
 
-    # Start the diagnostic coroutine in the background
-    cocotb.start_soon(axi_diag())
+    if os.getenv("E2E_AXI_DIAG") == "1":
+        cocotb.start_soon(axi_diag())
+
+    async def dma_diag():
+        prev_dma_start = 0
+        prev_dma_done = 0
+        wsram_writes = 0
+        wsram_hi_writes = 0
+        osram_reads = 0
+        store_prefills = 0
+        axi_writes = 0
+        ext_writes = 0
+
+        for _ in range(200000):
+            await RisingEdge(dut.clk)
+            await Timer(1, unit="ps")
+            try:
+                dma_start = int(dut.u_npu.dma_start.value)
+                dma_done = int(dut.u_npu.dma_done.value)
+                m0_req = int(dut.u_npu.m0_req.value)
+                m0_wen = int(dut.u_npu.m0_wen.value)
+                m0_grant = int(dut.u_npu.xbar_m0_grant.value)
+                m0_addr = int(dut.u_npu.m0_addr.value) & 0xFFFF
+                m0_wdata = int(dut.u_npu.m0_wdata.value) & 0xFFFFFFFF
+                m0_rdata = int(dut.u_npu.xbar_m0_rdata.value) & 0xFFFFFFFF
+                br_state = int(dut.u_npu.dma_br_state.value)
+                br_cnt = int(dut.u_npu.dma_br_cnt.value) & 0xFFFF
+                csr_sram = int(dut.u_npu.csr_dma_sram_addr.value) & 0xFFFF
+                csr_len = int(dut.u_npu.csr_dma_length.value) & 0xFFFF
+                csr_ext = int(dut.u_npu.csr_dma_ext_addr.value) & 0xFFFFFFFF
+                sim_we = int(dut.u_npu.dma_sim_sram_we.value)
+                sim_addr = int(dut.u_npu.dma_sim_sram_addr.value) & 0xFFFF
+                sim_wdata = int(dut.u_npu.dma_sim_sram_wdata.value) & 0xFFFFFFFFFFFFFFFF
+                axi_wvalid = int(dut.dma_axi_wvalid.value)
+                axi_wready = int(dut.dma_axi_wready.value)
+                axi_wdata = int(dut.dma_axi_wdata.value) & 0xFFFFFFFFFFFFFFFF
+                axi_awaddr = int(dut.dma_axi_awaddr.value) & 0xFFFFFFFF
+                axi_wr_en = int(dut.axi_wr_en.value)
+                axi_wr_addr = int(dut.axi_wr_addr.value) & 0xFFFFFF
+                axi_wr_wdata = int(dut.axi_wr_wdata.value) & 0xFFFFFFFF
+            except Exception:
+                continue
+
+            if dma_start and not prev_dma_start:
+                dut._log.info(
+                    "[DMADIAG] start ext=0x%08X sram=0x%04X len=%d br_state=%d",
+                    csr_ext, csr_sram, csr_len, br_state,
+                )
+            if dma_done and not prev_dma_done:
+                dut._log.info(
+                    "[DMADIAG] dma_done sram=0x%04X len=%d br_state=%d",
+                    csr_sram, csr_len, br_state,
+                )
+            if m0_req and m0_wen and m0_grant and ((m0_addr >> 12) == 1):
+                wsram_writes += 1
+                if m0_addr >= 0x1080:
+                    wsram_hi_writes += 1
+                if wsram_writes <= 8 or m0_addr >= 0x1080:
+                    dut._log.info(
+                        "[DMADIAG] WSRAM write addr=0x%04X data=0x%08X br_cnt=%d total=%d hi=%d",
+                        m0_addr, m0_wdata, br_cnt, wsram_writes, wsram_hi_writes,
+                    )
+            if m0_req and not m0_wen and m0_grant and ((m0_addr >> 12) == 2):
+                osram_reads += 1
+                if osram_reads <= 8:
+                    dut._log.info(
+                        "[DMADIAG] OSRAM read addr=0x%04X rdata=0x%08X br_cnt=%d total=%d",
+                        m0_addr, m0_rdata, br_cnt, osram_reads,
+                    )
+            if sim_we and 0x2000 <= sim_addr < 0x2200:
+                store_prefills += 1
+                if store_prefills <= 8:
+                    dut._log.info(
+                        "[DMADIAG] prefill sim_sram addr=0x%04X data=0x%016X total=%d",
+                        sim_addr, sim_wdata, store_prefills,
+                    )
+            if axi_wvalid and axi_wready and 0x40001100 <= axi_awaddr < 0x40001400:
+                axi_writes += 1
+                if axi_writes <= 8:
+                    dut._log.info(
+                        "[DMADIAG] AXI W awaddr=0x%08X wdata=0x%016X total=%d",
+                        axi_awaddr, axi_wdata, axi_writes,
+                    )
+            if axi_wr_en and 0x440 <= axi_wr_addr < 0x500:
+                ext_writes += 1
+                if ext_writes <= 16:
+                    dut._log.info(
+                        "[DMADIAG] ext write word=%d data=0x%08X total=%d",
+                        axi_wr_addr, axi_wr_wdata, ext_writes,
+                    )
+
+            prev_dma_start = dma_start
+            prev_dma_done = dma_done
+
+    if os.getenv("E2E_DMA_DIAG") == "1":
+        cocotb.start_soon(dma_diag())
+
+    async def gemm_diag():
+        logged = 0
+        for _ in range(120000):
+            await RisingEdge(dut.clk)
+            await Timer(1, unit="ps")
+            try:
+                state = int(dut.u_npu.u_gemm.ctrl_state.value)
+                k_cnt = int(dut.u_npu.u_gemm.ctrl.k_cnt.value)
+                feed_k = int(dut.u_npu.gpl_feed_k.value)
+                feeding = int(dut.u_npu.gpl_feeding.value)
+                gemm_busy = int(dut.u_npu.gemm_busy.value)
+                a_valid = int(dut.u_npu.u_gemm.a_valid.value)
+            except Exception:
+                continue
+
+            if state == 3 or (logged and state in (4, 5)):
+                if logged < 24:
+                    dut._log.info(
+                        "[GEMMDIAG] state=%d k_cnt=%d feed_k=%d feeding=%d busy=%d a_valid=%d",
+                        state, k_cnt, feed_k, feeding, gemm_busy, a_valid,
+                    )
+                    logged += 1
+
+    if os.getenv("E2E_GEMM_DIAG") == "1":
+        cocotb.start_soon(gemm_diag())
 
     # ═══════════════════════════════════════════════════════════════════
     # HANG DIAGNOSTIC: probe trap_latched, PC, npu_busy (background)
     # ═══════════════════════════════════════════════════════════════════
     async def hang_diag():
         log = dut._log
+        def read_path(path, default="N/A"):
+            obj = dut
+            try:
+                for part in path.split("."):
+                    obj = getattr(obj, part)
+                return int(obj.value)
+            except Exception:
+                return default
+
         for cyc in range(2000000):
             await RisingEdge(dut.clk)
             await Timer(1, unit="ps")
@@ -402,14 +560,36 @@ async def test_e2e_gemm_pass(dut):
                     log.info(f"[HANGDIAG] cycle 1000: trap_latched = {trap_val}")
                 except Exception as e:
                     log.warning(f"[HANGDIAG] cycle 1000: trap_latched read failed: {e}")
-            # Probe 2+3: PC and npu_busy every 200k cycles + at 1200k
-            if cyc in (199999, 399999, 599999, 799999, 999999, 1199999, 1399999, 1599999, 1799999, 1999999):
-                try:
-                    pc = int(dut.u_cpu.u_picorv32.reg_pc.value)
-                    busy = int(dut.u_npu.npu_busy.value)
-                    log.info(f"[HANGDIAG] cycle {cyc+1}: reg_pc = 0x{pc:08X}, npu_busy = {busy}")
-                except Exception as e:
-                    log.warning(f"[HANGDIAG] cycle {cyc+1}: read failed: {e}")
+            # Probe 2+3: PC, NPU busy, and CPU bus state at early checkpoints.
+            if cyc in (59999, 79999, 99999, 119999, 149999,
+                       199999, 399999, 599999, 799999, 999999,
+                       1199999, 1399999, 1599999, 1799999, 1999999):
+                pc = read_path("u_cpu.u_picorv32.reg_pc")
+                busy = read_path("u_npu.npu_busy")
+                mem_valid = read_path("u_cpu.cpu_mem_valid")
+                mem_ready = read_path("u_cpu.cpu_mem_ready")
+                mem_addr = read_path("u_cpu.cpu_mem_addr")
+                mem_wstrb = read_path("u_cpu.cpu_mem_wstrb")
+                periph_req = read_path("periph_req")
+                periph_write = read_path("periph_write")
+                periph_addr = read_path("periph_addr")
+                csr_req = read_path("npu_csr_req")
+                csr_write = read_path("npu_csr_write")
+                csr_addr = read_path("npu_csr_addr")
+                csr_rdata = read_path("npu_csr_rdata")
+                pc_str = f"0x{pc:08X}" if isinstance(pc, int) else pc
+                mem_addr_str = f"0x{mem_addr:08X}" if isinstance(mem_addr, int) else mem_addr
+                periph_addr_str = f"0x{periph_addr:08X}" if isinstance(periph_addr, int) else periph_addr
+                csr_addr_str = f"0x{csr_addr:03X}" if isinstance(csr_addr, int) else csr_addr
+                csr_rdata_str = f"0x{csr_rdata:08X}" if isinstance(csr_rdata, int) else csr_rdata
+                log.info(
+                    f"[HANGDIAG] cycle {cyc+1}: pc={pc_str} npu_busy={busy} "
+                    f"mem_valid={mem_valid} mem_ready={mem_ready} "
+                    f"mem_addr={mem_addr_str} mem_wstrb={mem_wstrb} "
+                    f"periph_req={periph_req} periph_write={periph_write} "
+                    f"periph_addr={periph_addr_str} csr_req={csr_req} "
+                    f"csr_write={csr_write} csr_addr={csr_addr_str} csr_rdata={csr_rdata_str}"
+                )
     cocotb.start_soon(hang_diag())
 
     # ── Release reset — PicoRV32 starts executing firmware ────────────
@@ -435,7 +615,7 @@ async def test_e2e_gemm_pass(dut):
                   f"(MISMATCH by {(868-36)} words = {(868-36)*4} bytes)")
 
     # ── Read firmware symbol addresses from ELF (for diagnostics) ─────
-    import subprocess, os
+    import subprocess
     elf_path = os.path.join(os.path.dirname(__file__),
                             "..", "..", "build", "firmware_gemm.elf")
     elf_path = os.path.abspath(elf_path)
@@ -467,7 +647,7 @@ async def test_e2e_gemm_pass(dut):
 
     # ── Capture all UART output ───────────────────────────────────────
     chars = await wait_uart_all(dut, max_chars=64, timeout_cycles=4000000,
-                                idle_cycles=5000000, log=dut._log)
+                                idle_cycles=100000, log=dut._log)
 
     dut._log.info(f"Total UART chars received: {len(chars)}")
     dut._log.info(f"Raw UART bytes: {' '.join(f'0x{c:02X}' for c in chars)}")
@@ -601,6 +781,83 @@ async def test_e2e_gemm_pass(dut):
             dut._log.info(f"  [{i:3d}] hw={hw_val:6d} {match_str} golden={gold_val:6d}")
     else:
         dut._log.warning("Could not read gemm_result from ext_mem_model (returned X)")
+
+    if os.getenv("E2E_MEM_DIAG") == "1":
+        def read_mem_words(mem_obj, count, start=0):
+            vals = []
+            for idx in range(count):
+                try:
+                    vals.append(int(mem_obj[start + idx].value) & 0xFFFFFFFF)
+                except Exception as exc:
+                    vals.append(f"ERR:{exc}")
+            return vals
+
+        def log_words(label, vals):
+            formatted = " ".join(
+                f"{v:08X}" if isinstance(v, int) else str(v)
+                for v in vals
+            )
+            dut._log.info(f"[MEMDIAG] {label}: {formatted}")
+
+        try:
+            log_words("ASRAM words[0:8]",
+                      read_mem_words(dut.u_npu.u_crossbar.u_asram.mem, 8))
+            log_words("WSRAM words[0:8]",
+                      read_mem_words(dut.u_npu.u_crossbar.u_wsram.mem, 8))
+            log_words("WSRAM words[32:40]",
+                      read_mem_words(dut.u_npu.u_crossbar.u_wsram.mem, 8, 32))
+            log_words("OSRAM words[0:8]",
+                      read_mem_words(dut.u_npu.u_crossbar.u_osram.mem, 8))
+            osram_words = read_mem_words(dut.u_npu.u_crossbar.u_osram.mem, 128)
+            if all(isinstance(v, int) for v in osram_words):
+                import struct
+                osram_bytes = bytearray()
+                for word in osram_words:
+                    osram_bytes.extend(word.to_bytes(4, 'little'))
+                osram_mismatches = 0
+                col_mismatches = [0] * 16
+                for i in range(256):
+                    hw_val = struct.unpack_from('<h', osram_bytes, i * 2)[0]
+                    gold_val = struct.unpack_from('<h', golden_bytes, i * 2)[0]
+                    if hw_val != gold_val:
+                        col_mismatches[i % 16] += 1
+                        if osram_mismatches < 8:
+                            dut._log.info(
+                                "[MEMDIAG] OSRAM mismatch[%d] row=%d col=%d hw=%d golden=%d",
+                                i, i // 16, i % 16, hw_val, gold_val,
+                            )
+                        osram_mismatches += 1
+                dut._log.info("[MEMDIAG] OSRAM mismatches: %d/256", osram_mismatches)
+                dut._log.info("[MEMDIAG] OSRAM mismatch columns: %s", col_mismatches)
+        except Exception as exc:
+            dut._log.warning(f"[MEMDIAG] SRAM read failed: {exc}")
+
+        try:
+            dut._log.info(
+                "[MEMDIAG] gemm_issue_cmd_latched=0x%08X gemm_k_count=%d",
+                int(dut.u_npu.gemm_issue_cmd_latched.value) & 0xFFFFFFFF,
+                int(dut.u_npu.gemm_k_count.value) & 0xFF,
+            )
+            gpl_a0 = int(dut.u_npu.gpl_a_row[0].value)
+            gpl_b0 = int(dut.u_npu.gpl_b_row[0].value)
+            log_words("GPL A row0 words",
+                      [(gpl_a0 >> (32 * i)) & 0xFFFFFFFF for i in range(4)])
+            log_words("GPL B row0 words",
+                      [(gpl_b0 >> (32 * i)) & 0xFFFFFFFF for i in range(4)])
+            gpl_a8 = int(dut.u_npu.gpl_a_row[8].value)
+            gpl_b8 = int(dut.u_npu.gpl_b_row[8].value)
+            log_words("GPL A row8 words",
+                      [(gpl_a8 >> (32 * i)) & 0xFFFFFFFF for i in range(4)])
+            log_words("GPL B row8 words",
+                      [(gpl_b8 >> (32 * i)) & 0xFFFFFFFF for i in range(4)])
+            gpl_a15 = int(dut.u_npu.gpl_a_row[15].value)
+            gpl_b15 = int(dut.u_npu.gpl_b_row[15].value)
+            log_words("GPL A row15 words",
+                      [(gpl_a15 >> (32 * i)) & 0xFFFFFFFF for i in range(4)])
+            log_words("GPL B row15 words",
+                      [(gpl_b15 >> (32 * i)) & 0xFFFFFFFF for i in range(4)])
+        except Exception as exc:
+            dut._log.warning(f"[MEMDIAG] GPL buffer read failed: {exc}")
 
     # ── Final assertion ───────────────────────────────────────────────
     # The test passes only if all stage markers are uppercase AND

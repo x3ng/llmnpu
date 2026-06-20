@@ -1,20 +1,37 @@
 # sim/Makefile — Cocotb simulation targets for NPU
 # Each test target uses its own SIM_BUILD directory to avoid conflicts.
 
+SHELL := bash
+.SHELLFLAGS := -o pipefail -c
+
 TOPLEVEL_LANG = verilog
 SIM ?= icarus
 
 REPO_ROOT = $(abspath $(CURDIR)/..)
+SIM_DIR = $(CURDIR)
 
 COMPILE_ARGS = -I$(REPO_ROOT)/rtl/include
 SIM_ARGS =
 EXTRA_ARGS =
 
+VERILATOR_BUILD_JOBS ?= 4
+VERILATOR_BUILD_MODE ?= debug
+GEMM_WARN_ARGS = -Wno-fatal -Wno-CASEINCOMPLETE -Wno-PINMISSING -Wno-TIMESCALEMOD -Wno-CASEOVERLAP -Wno-WIDTHEXPAND -Wno-WIDTHTRUNC
+GEMM_DEBUG_EXTRA_ARGS = --output-split 5000 --output-split-cfuncs 5000 -CFLAGS "-O0"
+GEMM_MODE_EXTRA_ARGS = $(if $(filter release,$(VERILATOR_BUILD_MODE)),,$(GEMM_DEBUG_EXTRA_ARGS))
+GEMM_MODE_BUILD_ARGS = $(if $(filter release,$(VERILATOR_BUILD_MODE)),,OPT_FAST=-O0 OPT_SLOW=-O0 OPT_GLOBAL=-O0)
+GEMM_EXTRA_ARGS = $(GEMM_WARN_ARGS) $(GEMM_MODE_EXTRA_ARGS)
+GEMM_BUILD_ARGS = $(if $(BUILD_ARGS),$(BUILD_ARGS),-j$(VERILATOR_BUILD_JOBS) $(GEMM_MODE_BUILD_ARGS))
+E2E_COMPILE_ARGS = -I$(REPO_ROOT)/rtl/include -DHEX_FILE=\"$(SIM_BUILD)/sim/verilog/firmware.hex\"
+E2E_VERILATOR_INCLUDE_DIRS = $(REPO_ROOT)/rtl/include
+E2E_VERILATOR_EXTRA_ARGS = -f $(SIM_BUILD)/hex_def.f
+LOG_FILTER ?= PASS|FAIL|ERROR|UART|timeout|Timeout|wfi|WFI|trap|TRAP|mismatch|MISMATCH|FATAL|DIAG|HANG
+
 include $(shell cocotb-config --makefiles)/Makefile.sim
 
 .PHONY: test_pe test_gemm test_valu test_sfu test_dma test_dma_load test_memory test_if_id test_npu_top
 .PHONY: test_e2e test_e2e_csr test_e2e_boot test_e2e_gemm test_e2e_dma
-.PHONY: test_all clean
+.PHONY: rebuild_e2e_gemm e2e_gemm_log e2e_dma_log e2e_boot_log e2e_csr_log e2e_log test_quick test_all clean
 
 # ── Shared variables for all E2E (SoC-level) targets ──
 
@@ -51,7 +68,7 @@ E2E_RTL = \
 test_pe: SIM_BUILD = sim_build_pe
 test_pe:
 	@rm -rf $(SIM_BUILD)
-	PYTHONPATH=$(PWD)/cocotb:$$PYTHONPATH \
+	PYTHONPATH=$(SIM_DIR)/cocotb:$$PYTHONPATH \
 	MODULE=test_pe TOPLEVEL=pe \
 	VERILOG_SOURCES="$(REPO_ROOT)/rtl/npu/gemm/pe.sv" \
 	$(MAKE)
@@ -59,7 +76,7 @@ test_pe:
 test_gemm: SIM_BUILD = sim_build_gemm
 test_gemm:
 	@rm -rf $(SIM_BUILD)
-	PYTHONPATH=$(PWD)/cocotb:$$PYTHONPATH \
+	PYTHONPATH=$(SIM_DIR)/cocotb:$$PYTHONPATH \
 	MODULE=test_gemm TOPLEVEL=systolic_array \
 	VERILOG_SOURCES="$(REPO_ROOT)/rtl/npu/gemm/pe.sv $(REPO_ROOT)/rtl/npu/gemm/systolic_array.sv $(REPO_ROOT)/rtl/npu/gemm/gemm_controller.sv" \
 	$(MAKE)
@@ -67,7 +84,7 @@ test_gemm:
 test_valu: SIM_BUILD = sim_build_valu
 test_valu:
 	@rm -rf $(SIM_BUILD)
-	PYTHONPATH=$(PWD)/cocotb:$$PYTHONPATH \
+	PYTHONPATH=$(SIM_DIR)/cocotb:$$PYTHONPATH \
 	MODULE=test_valu TOPLEVEL=valu_top \
 	VERILOG_SOURCES="$(REPO_ROOT)/rtl/npu/valu/valu_lane.sv $(REPO_ROOT)/rtl/npu/valu/vregfile.sv $(REPO_ROOT)/rtl/npu/valu/valu_top.sv" \
 	$(MAKE)
@@ -75,7 +92,7 @@ test_valu:
 test_sfu: SIM_BUILD = sim_build_sfu
 test_sfu:
 	@rm -rf $(SIM_BUILD)
-	PYTHONPATH=$(PWD)/cocotb:$$PYTHONPATH \
+	PYTHONPATH=$(SIM_DIR)/cocotb:$$PYTHONPATH \
 	MODULE=test_sfu TOPLEVEL=sfu_top \
 	VERILOG_SOURCES="$(REPO_ROOT)/rtl/npu/sfu/lut_engine.sv $(REPO_ROOT)/rtl/npu/sfu/quant_dequant.sv $(REPO_ROOT)/rtl/npu/sfu/sfu_top.sv" \
 	$(MAKE)
@@ -83,7 +100,7 @@ test_sfu:
 test_dma: SIM_BUILD = sim_build_dma
 test_dma:
 	@rm -rf $(SIM_BUILD)
-	PYTHONPATH=$(PWD)/cocotb:$$PYTHONPATH \
+	PYTHONPATH=$(SIM_DIR)/cocotb:$$PYTHONPATH \
 	MODULE=test_dma TOPLEVEL=npu_dma \
 	VERILOG_SOURCES="$(REPO_ROOT)/ref/verilog-axi/rtl/axi_dma_rd.v $(REPO_ROOT)/rtl/interconnect/axi_dma_wrapper.sv $(REPO_ROOT)/rtl/npu/dma/npu_dma.sv" \
 	$(MAKE)
@@ -91,7 +108,7 @@ test_dma:
 test_dma_load: SIM_BUILD = sim_build_dma_load
 test_dma_load:
 	@rm -rf $(SIM_BUILD)
-	PYTHONPATH=$(PWD)/cocotb:$$PYTHONPATH \
+	PYTHONPATH=$(SIM_DIR)/cocotb:$$PYTHONPATH \
 	MODULE=test_dma_load TOPLEVEL=npu_dma \
 	VERILOG_SOURCES="$(REPO_ROOT)/ref/verilog-axi/rtl/axi_dma_rd.v $(REPO_ROOT)/rtl/interconnect/axi_dma_wrapper.sv $(REPO_ROOT)/rtl/npu/dma/npu_dma.sv" \
 	$(MAKE)
@@ -99,7 +116,7 @@ test_dma_load:
 test_memory: SIM_BUILD = sim_build_memory
 test_memory:
 	@rm -rf $(SIM_BUILD)
-	PYTHONPATH=$(PWD)/cocotb:$$PYTHONPATH \
+	PYTHONPATH=$(SIM_DIR)/cocotb:$$PYTHONPATH \
 	MODULE=test_memory TOPLEVEL=crossbar \
 	VERILOG_SOURCES="$(REPO_ROOT)/rtl/npu/memory/sram_bank.sv $(REPO_ROOT)/rtl/npu/memory/crossbar.sv" \
 	$(MAKE)
@@ -107,7 +124,7 @@ test_memory:
 test_if_id: SIM_BUILD = sim_build_if_id
 test_if_id:
 	@rm -rf $(SIM_BUILD)
-	PYTHONPATH=$(PWD)/cocotb:$$PYTHONPATH \
+	PYTHONPATH=$(SIM_DIR)/cocotb:$$PYTHONPATH \
 	MODULE=test_if_id TOPLEVEL=if_id_top \
 	VERILOG_SOURCES="$(REPO_ROOT)/rtl/npu/if_id/ifetch.sv $(REPO_ROOT)/rtl/npu/if_id/idecode.sv $(REPO_ROOT)/rtl/npu/if_id/dispatch.sv $(REPO_ROOT)/rtl/npu/if_id/if_id_top.sv" \
 	$(MAKE)
@@ -115,7 +132,7 @@ test_if_id:
 test_npu_top: SIM_BUILD = sim_build_npu_top
 test_npu_top:
 	@rm -rf $(SIM_BUILD)
-	PYTHONPATH=$(PWD)/cocotb:$$PYTHONPATH \
+	PYTHONPATH=$(SIM_DIR)/cocotb:$$PYTHONPATH \
 	MODULE=test_npu_top TOPLEVEL=npu_top \
 	VERILOG_SOURCES="$(E2E_RTL)" \
 	$(MAKE)
@@ -134,10 +151,19 @@ define build_fw
 	cp $(REPO_ROOT)/build/$(1).hex $(SIM_BUILD)/sim/verilog/$(1).hex
 	cp $(REPO_ROOT)/build/$(1).hex $(SIM_BUILD)/sim/verilog/firmware.hex
 	@# Generate iverilog command-line file overriding HEX_FILE to per-build path
-	@printf '+define+HEX_FILE="%s/sim/verilog/firmware.hex"\n' "$(SIM_BUILD)" > $(SIM_BUILD)/hex_def.f
+	@printf '%s\n' '+define+HEX_FILE=\"$(SIM_BUILD)/sim/verilog/firmware.hex\"' > $(SIM_BUILD)/hex_def.f
 	@# Fallback: copy to shared location for standalone/test runs
-	@mkdir -p $(PWD)/sim/verilog
-	cp $(REPO_ROOT)/build/$(1).hex $(PWD)/sim/verilog/firmware.hex
+	@mkdir -p $(REPO_ROOT)/sim/verilog
+	cp $(REPO_ROOT)/build/$(1).hex $(REPO_ROOT)/sim/verilog/firmware.hex
+endef
+
+define show_log
+	@if [ -f "$(1)" ]; then \
+		rg -n "$(LOG_FILTER)" "$(1)" || true; \
+	else \
+		echo "No log found: $(1)"; \
+		exit 1; \
+	fi
 endef
 
 # ── E2E Stage 1: CPU Boot ──
@@ -145,52 +171,45 @@ endef
 test_e2e_boot: SIM_BUILD = sim_build_boot
 test_e2e_boot:
 	@rm -rf $(SIM_BUILD)
-	$(call build_fw,fw_boot,$(PWD)/cocotb/firmware_boot.c)
-	PYTHONPATH=$(PWD)/cocotb:$$PYTHONPATH \
+	$(call build_fw,fw_boot,$(SIM_DIR)/cocotb/firmware_boot.c)
+	PYTHONPATH=$(SIM_DIR)/cocotb:$$PYTHONPATH \
 	MODULE=test_e2e_boot TOPLEVEL=top_soc \
 	VERILOG_SOURCES="$(E2E_RTL)" \
-	COMPILE_ARGS="-I$(REPO_ROOT)/rtl/include -f $(SIM_BUILD)/hex_def.f" \
-	$(MAKE) 2>&1 | tee $(SIM_BUILD)/test.log
+	$(MAKE) COMPILE_ARGS='$(E2E_COMPILE_ARGS)' \
+		2>&1 | tee $(SIM_BUILD)/test.log
 
 # ── E2E Stage 2: CSR ──
 
 test_e2e_csr: SIM_BUILD = sim_build_csr
 test_e2e_csr:
 	@rm -rf $(SIM_BUILD)
-	$(call build_fw,firmware_csr,$(PWD)/cocotb/firmware_csr.c)
-	PYTHONPATH=$(PWD)/cocotb:$$PYTHONPATH \
+	$(call build_fw,firmware_csr,$(SIM_DIR)/cocotb/firmware_csr.c)
+	PYTHONPATH=$(SIM_DIR)/cocotb:$$PYTHONPATH \
 	MODULE=test_e2e_csr TOPLEVEL=top_soc \
 	VERILOG_SOURCES="$(E2E_RTL)" \
-	COMPILE_ARGS="-I$(REPO_ROOT)/rtl/include -f $(SIM_BUILD)/hex_def.f" \
-	$(MAKE) 2>&1 | tee $(SIM_BUILD)/test.log
+	$(MAKE) COMPILE_ARGS='$(E2E_COMPILE_ARGS)' \
+		2>&1 | tee $(SIM_BUILD)/test.log
 
 # ── E2E Stage 3: DMA ──
 
 test_e2e_dma: SIM_BUILD = sim_build_e2e_dma
 test_e2e_dma:
 	@rm -rf $(SIM_BUILD)
-	$(call build_fw,firmware_dma,$(PWD)/cocotb/firmware_dma.c,-std=gnu99)
-	PYTHONPATH=$(PWD)/cocotb:$$PYTHONPATH \
+	$(call build_fw,firmware_dma,$(SIM_DIR)/cocotb/firmware_dma.c,-std=gnu99)
+	PYTHONPATH=$(SIM_DIR)/cocotb:$$PYTHONPATH \
 	MODULE=test_e2e_dma TOPLEVEL=top_soc \
 	VERILOG_SOURCES="$(E2E_RTL)" \
-	COMPILE_ARGS="-I$(REPO_ROOT)/rtl/include -f $(SIM_BUILD)/hex_def.f" \
-	$(MAKE) 2>&1 | tee $(SIM_BUILD)/test.log
+	$(MAKE) COMPILE_ARGS='$(E2E_COMPILE_ARGS)' \
+		2>&1 | tee $(SIM_BUILD)/test.log
 
 # ── E2E Stage 4: GEMM (Verilator) ──
 
 test_e2e_gemm: SIM_BUILD = sim_build_e2e_gemm
 test_e2e_gemm: SIM = verilator
-# EXTRA_ARGS is hardcoded in the $(MAKE) line below to avoid
-# target-specific variable scoping issues with recursive make.
-GEMM_EXTRA_ARGS = -Wno-fatal -Wno-CASEINCOMPLETE -Wno-PINMISSING -Wno-TIMESCALEMOD -Wno-CASEOVERLAP -Wno-WIDTHEXPAND -Wno-WIDTHTRUNC
 test_e2e_gemm:
-	@# Only clean if RTL changed or Vtop missing (Verilator compile = 20-40 min)
-	@if [ -f $(SIM_BUILD)/Vtop ] && git diff --quiet HEAD -- rtl/ 2>/dev/null; then \
-		echo "=== Vtop exists RTL unchanged, reusing build ==="; \
-	else \
-		echo "=== RTL changed or no Vtop, rebuilding ==="; \
-		rm -rf $(SIM_BUILD); \
-	fi
+	@echo "=== Reusing $(SIM_BUILD) when cocotb/Verilator dependencies are current ==="
+	@echo "=== Verilator C++ build jobs: $(VERILATOR_BUILD_JOBS) ==="
+	@echo "=== Verilator build mode: $(VERILATOR_BUILD_MODE) ==="
 	@# Guard: GEMM requires Verilator; refuse if vvp is running
 	@# (temporarily disabled: false positive from parent bash cmdline containing 'vvp')
 	@#if pgrep -x vvp > /dev/null; then \
@@ -198,12 +217,12 @@ test_e2e_gemm:
 	#	echo "Stop any running Icarus simulations first (kill \`ps aux | grep vvp\`)."; \
 	#	exit 1; \
 	#fi
-	@python3 $(REPO_ROOT)/tools/codegen/generate_golden.py --header > $(REPO_ROOT)/build/golden_gemm.h
 	@mkdir -p $(REPO_ROOT)/build
+	@python3 $(REPO_ROOT)/tools/codegen/generate_golden.py --header > $(REPO_ROOT)/build/golden_gemm.h
 	@echo "=== Building firmware_gemm firmware ==="
 	riscv32-none-elf-gcc -march=rv32im -mabi=ilp32 -nostdlib -ffreestanding -O2 \
 		-I$(REPO_ROOT)/build -I$(REPO_ROOT)/sw/driver -I$(REPO_ROOT)/sw/runtime \
-		-c $(PWD)/cocotb/firmware_gemm.c -o $(REPO_ROOT)/build/firmware_gemm.o
+		-c $(SIM_DIR)/cocotb/firmware_gemm.c -o $(REPO_ROOT)/build/firmware_gemm.o
 	riscv32-none-elf-gcc -march=rv32im -mabi=ilp32 -nostdlib -ffreestanding -O2 \
 		-I$(REPO_ROOT)/sw/driver -I$(REPO_ROOT)/sw/runtime \
 		-c $(REPO_ROOT)/sw/driver/npu_driver.c -o $(REPO_ROOT)/build/npu_driver_gemm.o
@@ -220,14 +239,24 @@ test_e2e_gemm:
 	@python3 -c "import sys; data=open('$(REPO_ROOT)/build/firmware_gemm.bin','rb').read(); data+=b'\x00'*(-len(data)%4); [print(f'{int.from_bytes(data[i:i+4],\"little\"):08x}') for i in range(0,len(data),4)]" > $(REPO_ROOT)/build/firmware_gemm.hex
 	@mkdir -p $(SIM_BUILD)/sim/verilog
 	cp $(REPO_ROOT)/build/firmware_gemm.hex $(SIM_BUILD)/sim/verilog/firmware_gemm.hex
-	@printf '+define+HEX_FILE="%s/sim/verilog/firmware_gemm.hex"\n' "$(SIM_BUILD)" > $(SIM_BUILD)/hex_def.f
-	@mkdir -p $(PWD)/sim/verilog
-	cp $(REPO_ROOT)/build/firmware_gemm.hex $(PWD)/sim/verilog/firmware.hex
-	PYTHONPATH=$(PWD)/cocotb:$$PYTHONPATH \
+	cp $(REPO_ROOT)/build/firmware_gemm.hex $(SIM_BUILD)/sim/verilog/firmware.hex
+	@printf '%s\n' '+define+HEX_FILE=\"$(SIM_BUILD)/sim/verilog/firmware_gemm.hex\"' > $(SIM_BUILD)/hex_def.f
+	@mkdir -p $(REPO_ROOT)/sim/verilog
+	cp $(REPO_ROOT)/build/firmware_gemm.hex $(REPO_ROOT)/sim/verilog/firmware.hex
+	PYTHONPATH=$(SIM_DIR)/cocotb:$$PYTHONPATH \
 	MODULE=test_e2e_gemm TOPLEVEL=top_soc \
 	VERILOG_SOURCES="$(E2E_RTL)" \
-	COMPILE_ARGS="-I$(REPO_ROOT)/rtl/include -f $(SIM_BUILD)/hex_def.f" \
-	$(MAKE) SIM=verilator EXTRA_ARGS="$(GEMM_EXTRA_ARGS)" 2>&1 | tee $(SIM_BUILD)/test.log
+	$(MAKE) SIM=verilator \
+		VERILOG_INCLUDE_DIRS='$(E2E_VERILATOR_INCLUDE_DIRS)' \
+		EXTRA_ARGS='$(GEMM_EXTRA_ARGS) $(E2E_VERILATOR_EXTRA_ARGS)' \
+		BUILD_ARGS='$(GEMM_BUILD_ARGS)' \
+			CUSTOM_COMPILE_DEPS='$(SIM_DIR)/Makefile $(E2E_RTL)' \
+		2>&1 | tee $(SIM_BUILD)/test.log
+
+rebuild_e2e_gemm:
+	@echo "=== Removing sim_build_e2e_gemm for an explicit Verilator rebuild ==="
+	rm -rf sim_build_e2e_gemm
+	$(MAKE) test_e2e_gemm
 
 # ── E2E Full SoC Integration ──
 
@@ -236,7 +265,7 @@ test_e2e:
 	@rm -rf $(SIM_BUILD)
 	@python3 $(REPO_ROOT)/tools/codegen/generate_golden.py --header > $(REPO_ROOT)/build/golden_gemm.h
 	$(call build_fw,firmware_e2e, \
-		$(PWD)/cocotb/firmware_e2e.c, \
+		$(SIM_DIR)/cocotb/firmware_e2e.c, \
 		-I$(REPO_ROOT)/build -I$(REPO_ROOT)/sw/driver -I$(REPO_ROOT)/sw/runtime)
 	riscv32-none-elf-gcc -march=rv32im -mabi=ilp32 -nostdlib -ffreestanding -O2 \
 		-I$(REPO_ROOT)/sw/driver -I$(REPO_ROOT)/sw/runtime \
@@ -254,16 +283,36 @@ test_e2e:
 	@python3 -c "import sys; data=open('$(REPO_ROOT)/build/firmware_e2e.bin','rb').read(); data+=b'\x00'*(-len(data)%4); [print(f'{int.from_bytes(data[i:i+4],\"little\"):08x}') for i in range(0,len(data),4)]" > $(REPO_ROOT)/build/firmware_e2e.hex
 	@mkdir -p $(SIM_BUILD)/sim/verilog
 	cp $(REPO_ROOT)/build/firmware_e2e.hex $(SIM_BUILD)/sim/verilog/firmware_e2e.hex
-	@printf '+define+HEX_FILE="%s/sim/verilog/firmware.hex"\n' "$(SIM_BUILD)" > $(SIM_BUILD)/hex_def.f
-	@mkdir -p $(PWD)/sim/verilog
-	cp $(REPO_ROOT)/build/firmware_e2e.hex $(PWD)/sim/verilog/firmware.hex
-	PYTHONPATH=$(PWD)/cocotb:$$PYTHONPATH \
+	cp $(REPO_ROOT)/build/firmware_e2e.hex $(SIM_BUILD)/sim/verilog/firmware.hex
+	@printf '%s\n' '+define+HEX_FILE=\"$(SIM_BUILD)/sim/verilog/firmware.hex\"' > $(SIM_BUILD)/hex_def.f
+	@mkdir -p $(REPO_ROOT)/sim/verilog
+	cp $(REPO_ROOT)/build/firmware_e2e.hex $(REPO_ROOT)/sim/verilog/firmware.hex
+	PYTHONPATH=$(SIM_DIR)/cocotb:$$PYTHONPATH \
 	MODULE=test_e2e TOPLEVEL=top_soc \
 	VERILOG_SOURCES="$(E2E_RTL)" \
-	COMPILE_ARGS="-I$(REPO_ROOT)/rtl/include -f $(SIM_BUILD)/hex_def.f" \
-	$(MAKE) 2>&1 | tee $(SIM_BUILD)/test.log
+	$(MAKE) COMPILE_ARGS='$(E2E_COMPILE_ARGS)' \
+		2>&1 | tee $(SIM_BUILD)/test.log
 
 # ── Batch targets ──
+
+e2e_boot_log:
+	$(call show_log,sim_build_boot/test.log)
+
+e2e_csr_log:
+	$(call show_log,sim_build_csr/test.log)
+
+e2e_dma_log:
+	$(call show_log,sim_build_e2e_dma/test.log)
+
+e2e_gemm_log:
+	$(call show_log,sim_build_e2e_gemm/test.log)
+
+e2e_log:
+	$(call show_log,sim_build_e2e/test.log)
+
+test_quick:
+	$(MAKE) test_gemm
+	$(MAKE) test_npu_top
 
 test_all:
 	$(MAKE) test_pe

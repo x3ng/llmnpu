@@ -190,27 +190,47 @@ module crossbar (
                         slv3_gv && slv3_gm == 1 ? ~m1_wen  :
                         slv3_gv && slv3_gm == 2 ? ~m2_wen  : 1'b0;
 
-    // ====== Combinational read-data mux ======
-    // m_rdata is driven directly by the SRAM's registered output.
-    // The SRAM's rdata signal is initialized to 0 at time 0 (see sram_bank.sv)
-    // so there is no X propagation.
-    assign m0_rdata = m0_grant ?
-        (m0_slv_id == 0 ? slv0_rdata :
-         m0_slv_id == 1 ? slv1_rdata :
-         m0_slv_id == 2 ? slv2_rdata :
-         m0_slv_id == 3 ? slv3_rdata : 32'h0) : 32'h0;
+    // ====== Registered read-data return mux ======
+    // SRAM reads are synchronous, so the data belongs to the grant/slave
+    // selection from the previous clock edge, not the current request.
+    logic       m0_rd_valid, m1_rd_valid, m2_rd_valid;
+    logic [3:0] m0_rd_slv_id, m1_rd_slv_id, m2_rd_slv_id;
 
-    assign m1_rdata = m1_grant ?
-        (m1_slv_id == 0 ? slv0_rdata :
-         m1_slv_id == 1 ? slv1_rdata :
-         m1_slv_id == 2 ? slv2_rdata :
-         m1_slv_id == 3 ? slv3_rdata : 32'h0) : 32'h0;
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            m0_rd_valid  <= 1'b0;
+            m1_rd_valid  <= 1'b0;
+            m2_rd_valid  <= 1'b0;
+            m0_rd_slv_id <= 4'd0;
+            m1_rd_slv_id <= 4'd0;
+            m2_rd_slv_id <= 4'd0;
+        end else begin
+            m0_rd_valid <= m0_grant && !m0_wen;
+            m1_rd_valid <= m1_grant && !m1_wen;
+            m2_rd_valid <= m2_grant && !m2_wen;
+            if (m0_grant && !m0_wen) m0_rd_slv_id <= m0_slv_id;
+            if (m1_grant && !m1_wen) m1_rd_slv_id <= m1_slv_id;
+            if (m2_grant && !m2_wen) m2_rd_slv_id <= m2_slv_id;
+        end
+    end
 
-    assign m2_rdata = m2_grant ?
-        (m2_slv_id == 0 ? slv0_rdata :
-         m2_slv_id == 1 ? slv1_rdata :
-         m2_slv_id == 2 ? slv2_rdata :
-         m2_slv_id == 3 ? slv3_rdata : 32'h0) : 32'h0;
+    assign m0_rdata = m0_rd_valid ?
+        (m0_rd_slv_id == 0 ? slv0_rdata :
+         m0_rd_slv_id == 1 ? slv1_rdata :
+         m0_rd_slv_id == 2 ? slv2_rdata :
+         m0_rd_slv_id == 3 ? slv3_rdata : 32'h0) : 32'h0;
+
+    assign m1_rdata = m1_rd_valid ?
+        (m1_rd_slv_id == 0 ? slv0_rdata :
+         m1_rd_slv_id == 1 ? slv1_rdata :
+         m1_rd_slv_id == 2 ? slv2_rdata :
+         m1_rd_slv_id == 3 ? slv3_rdata : 32'h0) : 32'h0;
+
+    assign m2_rdata = m2_rd_valid ?
+        (m2_rd_slv_id == 0 ? slv0_rdata :
+         m2_rd_slv_id == 1 ? slv1_rdata :
+         m2_rd_slv_id == 2 ? slv2_rdata :
+         m2_rd_slv_id == 3 ? slv3_rdata : 32'h0) : 32'h0;
 
     // ====== Instantiate 4 SRAM banks (4 KB window each, 32-bit words) ======
     localparam int SRAM_DEPTH = 1024;

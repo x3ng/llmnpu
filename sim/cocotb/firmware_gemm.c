@@ -76,66 +76,6 @@ static int wait_busy_clear(const char tag)
     return 0;
 }
 
-// Wait for npu_busy to go HIGH (operation started) with short timeout
-// Returns 0 if busy asserted, -1 if timeout
-static int wait_busy_assert(void)
-{
-    volatile unsigned int *csr_status = (volatile unsigned int *)0x10000004u;
-    volatile unsigned int to = 100000u;
-    while (!(*csr_status & 1u)) {
-        if (--to == 0) return -1;
-    }
-    return 0;
-}
-
-// ------------------------------------------------------------
-// Local DMA transfer — polls CSR_STATUS.BUSY (bit0) which
-// correctly reflects npu_busy.  The driver's _dma_xfer polls
-// CSR_DMA_CSR3 bits 2/3, which the CSR module never drives
-// from hardware — those bits always read back as written by
-// firmware, so the driver never actually waits for the DMA.
-//
-// After the DMA FSM returns to idle, the bridge FSM may still
-// be copying data between DMA-internal SRAM and crossbar SRAM
-// banks.  We add a word-proportional bridge delay.
-// ------------------------------------------------------------
-static int _dma_xfer_local(uint32_t ext_addr, uint32_t sram_off,
-                           uint32_t len, int is_st)
-{
-    volatile uint32_t *csr_status = (volatile uint32_t *)0x10000004u;
-    volatile uint32_t *csr_dma0   = (volatile uint32_t *)0x10000020u;
-    volatile uint32_t *csr_dma1   = (volatile uint32_t *)0x10000028u;
-    volatile uint32_t *csr_dma2   = (volatile uint32_t *)0x10000030u;
-    volatile uint32_t *csr_dma3   = (volatile uint32_t *)0x10000038u;
-    volatile uint32_t to;
-
-    // Wait for any previous DMA to finish (BUSY poll CSR_STATUS bit0)
-    if (wait_busy_clear('D') != 0) return -1;  // 'D' = pre-DMA clear wait
-
-    // Program DMA CSRs
-    *csr_dma0 = ext_addr;
-    *csr_dma1 = sram_off;
-    *csr_dma2 = len;
-
-    uint32_t ctrl = 0x1u;        // START bit
-    if (is_st) ctrl |= 0x2u;     // DIR_ST = store
-    *csr_dma3 = ctrl;
-
-    // Wait for DMA to assert BUSY (may happen immediately after CSR3 write)
-    if (wait_busy_assert() != 0) { /* warn but continue */ }
-
-    // Wait for DMA to de-assert BUSY (FSM returns to S_IDLE)
-    if (wait_busy_clear('d') != 0) return -1;  // 'd' = DMA busy wait
-
-    // Bridge FSM: COPY/PREFILL runs after dma_done and is NOT
-    // reflected in CSR_STATUS.BUSY.  Budget ~10 cycles per 4-byte
-    // crossbar word + margin.
-    to = (len >> 2) * 10u + 40u;
-    while (--to) { __asm__ volatile ("" : : : "memory"); }
-
-    return 0;
-}
-
 // ------------------------------------------------------------
 // Test data — 16x16 INT8 GEMM
 //   A[i][j] = (i + j) % 7 - 3   (row-major, in .rodata)
@@ -145,41 +85,41 @@ static int _dma_xfer_local(uint32_t ext_addr, uint32_t sram_off,
 //   precomputed and embedded as golden_C in .rodata
 // ------------------------------------------------------------
 static const int8_t test_A[256] __attribute__((aligned(4))) = {
-     -3,  -2,  -1,   0,   1,   2,   3,  -3,
-     -2,  -1,   0,   1,   2,   3,  -3,  -2,
-     -2,  -1,   0,   1,   2,   3,  -3,  -2,
-     -1,   0,   1,   2,   3,  -3,  -2,  -1,
-     -1,   0,   1,   2,   3,  -3,  -2,  -1,
-      0,   1,   2,   3,  -3,  -2,  -1,   0,
-      0,   1,   2,   3,  -3,  -2,  -1,   0,
-      1,   2,   3,  -3,  -2,  -1,   0,   1,
-      1,   2,   3,  -3,  -2,  -1,   0,   1,
-      2,   3,  -3,  -2,  -1,   0,   1,   2,
-      2,   3,  -3,  -2,  -1,   0,   1,   2,
-      3,  -3,  -2,  -1,   0,   1,   2,   3,
-      3,  -3,  -2,  -1,   0,   1,   2,   3,
-     -3,  -2,  -1,   0,   1,   2,   3,  -3,
-     -3,  -2,  -1,   0,   1,   2,   3,  -3,
-     -2,  -1,   0,   1,   2,   3,  -3,  -2
+     -3,  -2,  -1,   0,   1,   2,   3,  -3,  -2,  -1,   0,   1,   2,   3,  -3,  -2,
+     -2,  -1,   0,   1,   2,   3,  -3,  -2,  -1,   0,   1,   2,   3,  -3,  -2,  -1,
+     -1,   0,   1,   2,   3,  -3,  -2,  -1,   0,   1,   2,   3,  -3,  -2,  -1,   0,
+      0,   1,   2,   3,  -3,  -2,  -1,   0,   1,   2,   3,  -3,  -2,  -1,   0,   1,
+      1,   2,   3,  -3,  -2,  -1,   0,   1,   2,   3,  -3,  -2,  -1,   0,   1,   2,
+      2,   3,  -3,  -2,  -1,   0,   1,   2,   3,  -3,  -2,  -1,   0,   1,   2,   3,
+      3,  -3,  -2,  -1,   0,   1,   2,   3,  -3,  -2,  -1,   0,   1,   2,   3,  -3,
+     -3,  -2,  -1,   0,   1,   2,   3,  -3,  -2,  -1,   0,   1,   2,   3,  -3,  -2,
+     -2,  -1,   0,   1,   2,   3,  -3,  -2,  -1,   0,   1,   2,   3,  -3,  -2,  -1,
+     -1,   0,   1,   2,   3,  -3,  -2,  -1,   0,   1,   2,   3,  -3,  -2,  -1,   0,
+      0,   1,   2,   3,  -3,  -2,  -1,   0,   1,   2,   3,  -3,  -2,  -1,   0,   1,
+      1,   2,   3,  -3,  -2,  -1,   0,   1,   2,   3,  -3,  -2,  -1,   0,   1,   2,
+      2,   3,  -3,  -2,  -1,   0,   1,   2,   3,  -3,  -2,  -1,   0,   1,   2,   3,
+      3,  -3,  -2,  -1,   0,   1,   2,   3,  -3,  -2,  -1,   0,   1,   2,   3,  -3,
+     -3,  -2,  -1,   0,   1,   2,   3,  -3,  -2,  -1,   0,   1,   2,   3,  -3,  -2,
+     -2,  -1,   0,   1,   2,   3,  -3,  -2,  -1,   0,   1,   2,   3,  -3,  -2,  -1
 };
 
 static const int8_t test_B[256] __attribute__((aligned(4))) = {
-     -3,  -2,  -1,   0,   1,   2,   3,  -3,
-     -2,  -1,   0,   1,   2,   3,  -3,  -2,
-      0,   1,   2,   3,  -3,  -2,  -1,   0,
-      1,   2,   3,  -3,  -2,  -1,   0,   1,
-      3,  -3,  -2,  -1,   0,   1,   2,   3,
-     -3,  -2,  -1,   0,   1,   2,   3,  -3,
-     -1,   0,   1,   2,   3,  -3,  -2,  -1,
-      0,   1,   2,   3,  -3,  -2,  -1,   0,
-      2,   3,  -3,  -2,  -1,   0,   1,   2,
-      3,  -3,  -2,  -1,   0,   1,   2,   3,
-     -2,  -1,   0,   1,   2,   3,  -3,  -2,
-     -1,   0,   1,   2,   3,  -3,  -2,  -1,
-      1,   2,   3,  -3,  -2,  -1,   0,   1,
-      2,   3,  -3,  -2,  -1,   0,   1,   2,
-     -3,  -2,  -1,   0,   1,   2,   3,  -3,
-     -2,  -1,   0,   1,   2,   3,  -3,  -2
+     -3,  -2,  -1,   0,   1,   2,   3,  -3,  -2,  -1,   0,   1,   2,   3,  -3,  -2,
+      0,   1,   2,   3,  -3,  -2,  -1,   0,   1,   2,   3,  -3,  -2,  -1,   0,   1,
+      3,  -3,  -2,  -1,   0,   1,   2,   3,  -3,  -2,  -1,   0,   1,   2,   3,  -3,
+     -1,   0,   1,   2,   3,  -3,  -2,  -1,   0,   1,   2,   3,  -3,  -2,  -1,   0,
+      2,   3,  -3,  -2,  -1,   0,   1,   2,   3,  -3,  -2,  -1,   0,   1,   2,   3,
+     -2,  -1,   0,   1,   2,   3,  -3,  -2,  -1,   0,   1,   2,   3,  -3,  -2,  -1,
+      1,   2,   3,  -3,  -2,  -1,   0,   1,   2,   3,  -3,  -2,  -1,   0,   1,   2,
+     -3,  -2,  -1,   0,   1,   2,   3,  -3,  -2,  -1,   0,   1,   2,   3,  -3,  -2,
+      0,   1,   2,   3,  -3,  -2,  -1,   0,   1,   2,   3,  -3,  -2,  -1,   0,   1,
+      3,  -3,  -2,  -1,   0,   1,   2,   3,  -3,  -2,  -1,   0,   1,   2,   3,  -3,
+     -1,   0,   1,   2,   3,  -3,  -2,  -1,   0,   1,   2,   3,  -3,  -2,  -1,   0,
+      2,   3,  -3,  -2,  -1,   0,   1,   2,   3,  -3,  -2,  -1,   0,   1,   2,   3,
+     -2,  -1,   0,   1,   2,   3,  -3,  -2,  -1,   0,   1,   2,   3,  -3,  -2,  -1,
+      1,   2,   3,  -3,  -2,  -1,   0,   1,   2,   3,  -3,  -2,  -1,   0,   1,   2,
+     -3,  -2,  -1,   0,   1,   2,   3,  -3,  -2,  -1,   0,   1,   2,   3,  -3,  -2,
+      0,   1,   2,   3,  -3,  -2,  -1,   0,   1,   2,   3,  -3,  -2,  -1,   0,   1
 };
 
 // Golden: C = A x B  (int16, in .rodata — auto-generated)
@@ -189,7 +129,7 @@ static const int8_t test_B[256] __attribute__((aligned(4))) = {
 // ------------------------------------------------------------
 // Global variables (.bss — zeroed at boot, then filled by DMA STORE)
 // ------------------------------------------------------------
-volatile int16_t gemm_result[256] __attribute__((aligned(4)));
+volatile int16_t gemm_result[256] __attribute__((aligned(8)));
 
 // ------------------------------------------------------------
 // Bare-metal entry point
@@ -274,9 +214,9 @@ void main(void)
               {
                   int fail = 0;
                   for (int r = 0; r < 16; r++) {
-                    if (_dma_xfer_local(
+                    if (npu_dma_ld(&npu,
                           (uint32_t)(uintptr_t)(&test_A[(m_off+r)*K + k_off]),
-                          0x0000u + (uint32_t)(r * 16), 16, 0) != 0) {
+                          0x0000u + (uint32_t)(r * 16), 16) != 0) {
                       fail = 1; break;
                     }
                     uart_putc('a');
@@ -308,9 +248,9 @@ void main(void)
               {
                   int fail = 0;
                   for (int r = 0; r < 16; r++) {
-                    if (_dma_xfer_local(
+                    if (npu_dma_ld(&npu,
                           (uint32_t)(uintptr_t)(&test_B[(k_off+r)*N + n_off]),
-                          0x1000u + (uint32_t)(r * 16), 16, 0) != 0) {
+                          0x1000u + (uint32_t)(r * 16), 16) != 0) {
                       fail = 1; break;
                     }
                   }
@@ -327,12 +267,8 @@ void main(void)
                   uint32_t desc[2];
                   desc[0] = 0;
                   desc[1] = 0;
-                  // Load descriptor into DSRAM at bump-allocator base
-                  // (npu_load_descriptor uses _dma_xfer internally — bypass it)
-                  int dp = 0x3000;
-                  if (_dma_xfer_local((uint32_t)(uintptr_t)desc, dp, 8, 0) != 0) {
-                    fail = 1; dp = -1;
-                  }
+                  // Load descriptor into DSRAM via driver DMA path.
+                  int dp = npu_load_descriptor(&npu, desc, sizeof(desc));
                   if (dp < 0) { fail = 1; }
                   else if (npu_issue(&npu, 0x01 /* OP_GEMM */, (uint32_t)dp) != 0) {
                       fail = 1;
@@ -368,15 +304,12 @@ void main(void)
               // STORE: DMA STORE C tile rows from OSRAM → ext_mem
               // --------------------------------------------------
               {
-                  // Prime DMA direction bit so first STORE is correct
-                  *(volatile uint32_t *)(0x10000000u + 0x38u) = 0x00000002u;
-
                   int fail = 0;
                   for (int r = 0; r < 16; r++) {
                     uint32_t ext_c = (uint32_t)(uintptr_t)(
                         &gemm_result[(m_off + r) * N + n_off]);
                     uint32_t sro   = 0x2000u + (uint32_t)(r * 32);
-                    if (_dma_xfer_local(ext_c, sro, 32, 1) != 0) {
+                    if (npu_dma_st(&npu, ext_c, sro, 32) != 0) {
                       fail = 1; break;
                     }
                   }

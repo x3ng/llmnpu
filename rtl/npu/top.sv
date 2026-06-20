@@ -140,6 +140,9 @@ module npu_top #(
     logic [31:0] gemm_cmd, valu_cmd, sfu_cmd, dma_cmd;
     logic        gemm_busy, valu_busy, sfu_busy, dma_busy;
     logic        if_stall;
+    logic        gemm_issue_valid;
+    logic [31:0] gemm_issue_cmd;
+    logic [31:0] gemm_issue_cmd_latched;
 
     // ================================================================
     // IF/ID Pipeline
@@ -182,8 +185,17 @@ module npu_top #(
     logic        gpl_gemm_start;
     logic        gpl_feeding;
 
-    assign gemm_start   = gpl_gemm_start;
-    assign gemm_k_count = gemm_cmd[7:0];
+    assign gemm_issue_valid = gemm_cmd_valid || csr_start;
+    assign gemm_issue_cmd   = csr_start ? {`OP_GEMM, 16'd0, 8'd16} : gemm_cmd;
+    assign gemm_start       = gpl_gemm_start;
+    assign gemm_k_count     = gemm_issue_cmd_latched[7:0];
+
+    always_ff @(posedge clk or negedge dp_rst_n) begin
+        if (!dp_rst_n)
+            gemm_issue_cmd_latched <= 32'd0;
+        else if (gemm_issue_valid)
+            gemm_issue_cmd_latched <= gemm_issue_cmd;
+    end
 
     systolic_array #(
         .ROWS(`GEMM_ROWS), .COLS(`GEMM_COLS), .K_MAX(`GEMM_K_MAX)
@@ -431,25 +443,44 @@ module npu_top #(
     // For a DMA STORE, the FSM reads from crossbar SRAM and writes
     // into DMA's internal SRAM before DMA STORE starts.
     // ================================================================
-    logic [15:0]   dma_br_cnt;
+	    logic [15:0]   dma_br_cnt;
+	    logic          dma_br_phase;
+	    logic          dma_br_word_active;
+
+    assign dma_br_word_active = (dma_br_cnt < csr_dma_length);
 
     always_ff @(posedge clk or negedge dp_rst_n) begin
-        if (!dp_rst_n) begin
-            dma_br_state <= DMA_BR_IDLE;
-            dma_br_cnt   <= 16'd0;
-        end else begin
-            dma_br_state <= dma_br_next;
-            case (dma_br_state)
-                DMA_BR_IDLE: begin
-                    dma_br_cnt <= 16'd0;
-                end
-                DMA_BR_PREFILL: begin
-                    if (xbar_m0_grant)
-                        dma_br_cnt <= dma_br_cnt + 16'd4;
+	        if (!dp_rst_n) begin
+	            dma_br_state <= DMA_BR_IDLE;
+	            dma_br_cnt   <= 16'd0;
+	            dma_br_phase <= 1'b0;
+	        end else begin
+	            dma_br_state <= dma_br_next;
+	            case (dma_br_state)
+	                DMA_BR_IDLE: begin
+	                    dma_br_cnt <= 16'd0;
+	                    dma_br_phase <= 1'b0;
+	                end
+	                DMA_BR_PREFILL: begin
+	                    if (!dma_br_word_active) begin
+	                        dma_br_phase <= 1'b0;
+	                    end else if (!dma_br_phase) begin
+	                        if (xbar_m0_grant)
+	                            dma_br_phase <= 1'b1;
+	                    end else begin
+	                        dma_br_cnt <= dma_br_cnt + 16'd4;
+	                        dma_br_phase <= 1'b0;
+	                    end
                 end
                 DMA_BR_COPY: begin
-                    if (xbar_m0_grant)
+                    if (!dma_br_word_active) begin
+                        dma_br_phase <= 1'b0;
+                    end else if (!dma_br_phase) begin
+                        dma_br_phase <= 1'b1;
+                    end else if (xbar_m0_grant) begin
                         dma_br_cnt <= dma_br_cnt + 16'd4;
+                        dma_br_phase <= 1'b0;
+                    end
                 end
             endcase
         end
@@ -475,16 +506,20 @@ module npu_top #(
         endcase
     end
 
-    assign dma_sim_sram_en   = (dma_br_state == DMA_BR_COPY) || (dma_br_state == DMA_BR_PREFILL);
-    assign dma_sim_sram_we   = (dma_br_state == DMA_BR_PREFILL);
+    assign dma_sim_sram_en   = dma_br_word_active &&
+                                (((dma_br_state == DMA_BR_COPY) && !dma_br_phase) ||
+                                 ((dma_br_state == DMA_BR_PREFILL) && dma_br_phase));
+    assign dma_sim_sram_we   = (dma_br_state == DMA_BR_PREFILL) && dma_br_phase;
     assign dma_sim_sram_addr = csr_dma_sram_addr + dma_br_cnt;
-    assign dma_sim_sram_wdata= (dma_br_state == DMA_BR_PREFILL) ? {32'd0, xbar_m0_rdata} : 64'd0;
+	    assign dma_sim_sram_wdata= (dma_br_state == DMA_BR_PREFILL) ? {32'd0, xbar_m0_rdata} : 64'd0;
 
     // M0 (DMA) driven by bridge FSM
-    assign m0_req   = (dma_br_state == DMA_BR_COPY) || (dma_br_state == DMA_BR_PREFILL);
+	    assign m0_req   = dma_br_word_active &&
+	                      (((dma_br_state == DMA_BR_COPY) && dma_br_phase) ||
+	                       (dma_br_state == DMA_BR_PREFILL));
     assign m0_addr  = csr_dma_sram_addr + dma_br_cnt;
     assign m0_wdata = (dma_br_state == DMA_BR_COPY) ? dma_sim_sram_rdata[31:0] : 32'd0;
-    assign m0_wen   = (dma_br_state == DMA_BR_COPY);
+    assign m0_wen   = (dma_br_state == DMA_BR_COPY) && dma_br_phase;
 
     // DMA sim_ext ports — only used in standalone DMA tests to access
     // wrapper's internal AXI RAM.  When DMA_STANDALONE=0, the wrapper
@@ -511,21 +546,37 @@ module npu_top #(
     gpl_state_t  gpl_state, gpl_next;
     logic [3:0]  gpl_row;
     logic [1:0]  gpl_word;
-    logic [127:0] gpl_b_buf;
+    logic [127:0] gpl_b_row [0:15];
+    logic [127:0] gpl_a_row [0:15];
 
-    logic [127:0] gpl_a_row0, gpl_a_row1,  gpl_a_row2,  gpl_a_row3;
-    logic [127:0] gpl_a_row4, gpl_a_row5,  gpl_a_row6,  gpl_a_row7;
-    logic [127:0] gpl_a_row8, gpl_a_row9,  gpl_a_row10, gpl_a_row11;
-    logic [127:0] gpl_a_row12,gpl_a_row13, gpl_a_row14, gpl_a_row15;
-
-    logic [3:0]  gpl_feed_row;
+    logic [3:0]  gpl_feed_k;
+    logic [6:0]  gpl_feed_byte;
+    logic [1:0]  gpl_feed_phase;
+    logic [127:0] gpl_b_feed_row;
+    logic [1:0]  gpl_b_word;
+    logic        gpl_capture_valid;
+    logic        gpl_capture_is_b;
+    logic [3:0]  gpl_capture_row;
+    logic [1:0]  gpl_capture_word;
 
     logic [15:0] gpl_read_addr;
+    always_comb begin
+        case (gpl_state)
+            GPL_LOAD_B0: gpl_b_word = 2'd0;
+            GPL_LOAD_B1: gpl_b_word = 2'd1;
+            GPL_LOAD_B2: gpl_b_word = 2'd2;
+            GPL_LOAD_B3: gpl_b_word = 2'd3;
+            default:     gpl_b_word = 2'd0;
+        endcase
+    end
+
     always_comb begin
         gpl_read_addr = 16'd0;
         case (gpl_state)
             GPL_LOAD_B0, GPL_LOAD_B1, GPL_LOAD_B2, GPL_LOAD_B3:
-                gpl_read_addr = `WSRAM_BASE + {12'd0, gpl_word, 2'd0};
+                gpl_read_addr = `WSRAM_BASE
+                              + {gpl_row, 4'd0}
+                              + {10'd0, gpl_b_word, 2'd0};
             GPL_LOAD_A:
                 gpl_read_addr = `ASRAM_BASE
                               + {gpl_row, 4'd0}
@@ -535,24 +586,10 @@ module npu_top #(
     end
 
     always_comb begin
-        case (gpl_feed_row)
-            4'd0:  gemm_a_in = gpl_a_row0;
-            4'd1:  gemm_a_in = gpl_a_row1;
-            4'd2:  gemm_a_in = gpl_a_row2;
-            4'd3:  gemm_a_in = gpl_a_row3;
-            4'd4:  gemm_a_in = gpl_a_row4;
-            4'd5:  gemm_a_in = gpl_a_row5;
-            4'd6:  gemm_a_in = gpl_a_row6;
-            4'd7:  gemm_a_in = gpl_a_row7;
-            4'd8:  gemm_a_in = gpl_a_row8;
-            4'd9:  gemm_a_in = gpl_a_row9;
-            4'd10: gemm_a_in = gpl_a_row10;
-            4'd11: gemm_a_in = gpl_a_row11;
-            4'd12: gemm_a_in = gpl_a_row12;
-            4'd13: gemm_a_in = gpl_a_row13;
-            4'd14: gemm_a_in = gpl_a_row14;
-            4'd15: gemm_a_in = gpl_a_row15;
-        endcase
+        gpl_feed_byte = {gpl_feed_k, 3'b000};
+        for (int r = 0; r < 16; r++)
+            gemm_a_in[r] = gpl_a_row[r][gpl_feed_byte +: 8];
+        gpl_b_feed_row = gpl_b_row[gpl_feed_k];
     end
 
     always_ff @(posedge clk or negedge dp_rst_n) begin
@@ -560,60 +597,61 @@ module npu_top #(
             gpl_state     <= GPL_IDLE;
             gpl_row       <= 4'd0;
             gpl_word      <= 2'd0;
-            gpl_b_buf     <= 128'd0;
             gpl_gemm_start<= 1'b0;
-            gpl_feed_row  <= 4'd0;
+            gpl_feed_k    <= 4'd0;
+            gpl_feed_phase<= 2'd0;
             gpl_feeding   <= 1'b0;
-            gpl_a_row0    <= 128'd0; gpl_a_row1  <= 128'd0;
-            gpl_a_row2    <= 128'd0; gpl_a_row3  <= 128'd0;
-            gpl_a_row4    <= 128'd0; gpl_a_row5  <= 128'd0;
-            gpl_a_row6    <= 128'd0; gpl_a_row7  <= 128'd0;
-            gpl_a_row8    <= 128'd0; gpl_a_row9  <= 128'd0;
-            gpl_a_row10   <= 128'd0; gpl_a_row11 <= 128'd0;
-            gpl_a_row12   <= 128'd0; gpl_a_row13 <= 128'd0;
-            gpl_a_row14   <= 128'd0; gpl_a_row15 <= 128'd0;
+            gpl_capture_valid <= 1'b0;
+            gpl_capture_is_b  <= 1'b0;
+            gpl_capture_row   <= 4'd0;
+            gpl_capture_word  <= 2'd0;
+            for (int r = 0; r < 16; r++) begin
+                gpl_b_row[r] <= 128'd0;
+                gpl_a_row[r] <= 128'd0;
+            end
         end else begin
             gpl_state <= gpl_next;
             gpl_gemm_start <= 1'b0;
+
+            // Crossbar SRAM banks are synchronous-read.  A grant issues
+            // the read this cycle; the corresponding rdata is captured
+            // on the next clock with this delayed metadata.
+            if (gpl_capture_valid) begin
+                if (gpl_capture_is_b)
+                    gpl_b_row[gpl_capture_row][{gpl_capture_word, 5'b00000} +: 32] <= xbar_m1_rdata;
+                else
+                    gpl_a_row[gpl_capture_row][{gpl_capture_word, 5'b00000} +: 32] <= xbar_m1_rdata;
+            end
+            gpl_capture_valid <= 1'b0;
+
             case (gpl_state)
                 GPL_IDLE: begin
                     gpl_row   <= 4'd0;
                     gpl_word  <= 2'd0;
                     gpl_feeding <= 1'b0;
-                    gpl_feed_row <= 4'd0;
+                    gpl_feed_k <= 4'd0;
+                    gpl_feed_phase <= 2'd0;
                 end
                 GPL_LOAD_B0, GPL_LOAD_B1, GPL_LOAD_B2, GPL_LOAD_B3: begin
                     if (xbar_m1_grant) begin
-                        case (gpl_state)
-                            GPL_LOAD_B0: gpl_b_buf[31:0]   <= xbar_m1_rdata;
-                            GPL_LOAD_B1: gpl_b_buf[63:32]  <= xbar_m1_rdata;
-                            GPL_LOAD_B2: gpl_b_buf[95:64]  <= xbar_m1_rdata;
-                            GPL_LOAD_B3: gpl_b_buf[127:96] <= xbar_m1_rdata;
-                            default: ;
-                        endcase
+                        gpl_capture_valid <= 1'b1;
+                        gpl_capture_is_b  <= 1'b1;
+                        gpl_capture_row   <= gpl_row;
+                        gpl_capture_word  <= gpl_b_word;
+                        if (gpl_state == GPL_LOAD_B3) begin
+                            if (gpl_row < 4'd15)
+                                gpl_row <= gpl_row + 4'd1;
+                            else
+                                gpl_row <= 4'd0;
+                        end
                     end
                 end
                 GPL_LOAD_A: begin
                     if (xbar_m1_grant) begin
-                        // Capture A matrix row data (merged from separate always_ff)
-                        case (gpl_row)
-                            4'd0:  gpl_a_row0[gpl_word*32 +: 32]  <= xbar_m1_rdata;
-                            4'd1:  gpl_a_row1[gpl_word*32 +: 32]  <= xbar_m1_rdata;
-                            4'd2:  gpl_a_row2[gpl_word*32 +: 32]  <= xbar_m1_rdata;
-                            4'd3:  gpl_a_row3[gpl_word*32 +: 32]  <= xbar_m1_rdata;
-                            4'd4:  gpl_a_row4[gpl_word*32 +: 32]  <= xbar_m1_rdata;
-                            4'd5:  gpl_a_row5[gpl_word*32 +: 32]  <= xbar_m1_rdata;
-                            4'd6:  gpl_a_row6[gpl_word*32 +: 32]  <= xbar_m1_rdata;
-                            4'd7:  gpl_a_row7[gpl_word*32 +: 32]  <= xbar_m1_rdata;
-                            4'd8:  gpl_a_row8[gpl_word*32 +: 32]  <= xbar_m1_rdata;
-                            4'd9:  gpl_a_row9[gpl_word*32 +: 32]  <= xbar_m1_rdata;
-                            4'd10: gpl_a_row10[gpl_word*32 +: 32] <= xbar_m1_rdata;
-                            4'd11: gpl_a_row11[gpl_word*32 +: 32] <= xbar_m1_rdata;
-                            4'd12: gpl_a_row12[gpl_word*32 +: 32] <= xbar_m1_rdata;
-                            4'd13: gpl_a_row13[gpl_word*32 +: 32] <= xbar_m1_rdata;
-                            4'd14: gpl_a_row14[gpl_word*32 +: 32] <= xbar_m1_rdata;
-                            4'd15: gpl_a_row15[gpl_word*32 +: 32] <= xbar_m1_rdata;
-                        endcase
+                        gpl_capture_valid <= 1'b1;
+                        gpl_capture_is_b  <= 1'b0;
+                        gpl_capture_row   <= gpl_row;
+                        gpl_capture_word  <= gpl_word;
                         if (gpl_word == 2'd3) begin
                             if (gpl_row < 4'd15)
                                 gpl_row <= gpl_row + 4'd1;
@@ -626,11 +664,16 @@ module npu_top #(
                 GPL_START: begin
                     gpl_gemm_start <= 1'b1;
                     gpl_feeding    <= 1'b1;
-                    gpl_feed_row   <= 4'd0;
+                    gpl_feed_k     <= 4'd0;
+                    gpl_feed_phase <= 2'd0;
                 end
                 GPL_WAIT: begin
-                    if (gemm_busy && gpl_feed_row < 4'd15)
-                        gpl_feed_row <= gpl_feed_row + 4'd1;
+                    if (gemm_busy) begin
+                        if (gpl_feed_phase < 2'd1)
+                            gpl_feed_phase <= gpl_feed_phase + 2'd1;
+                        else if (gpl_feed_k < 4'd15)
+                            gpl_feed_k <= gpl_feed_k + 4'd1;
+                    end
                     if (gemm_done)
                         gpl_feeding <= 1'b0;
                 end
@@ -641,11 +684,16 @@ module npu_top #(
     always_comb begin
         gpl_next = gpl_state;
         case (gpl_state)
-            GPL_IDLE:    if (gemm_cmd_valid)               gpl_next = GPL_LOAD_B0;
+            GPL_IDLE:    if (gemm_issue_valid)             gpl_next = GPL_LOAD_B0;
             GPL_LOAD_B0: if (xbar_m1_grant)                gpl_next = GPL_LOAD_B1;
             GPL_LOAD_B1: if (xbar_m1_grant)                gpl_next = GPL_LOAD_B2;
             GPL_LOAD_B2: if (xbar_m1_grant)                gpl_next = GPL_LOAD_B3;
-            GPL_LOAD_B3: if (xbar_m1_grant)                gpl_next = GPL_LOAD_A;
+            GPL_LOAD_B3: if (xbar_m1_grant) begin
+                              if (gpl_row == 4'd15)
+                                  gpl_next = GPL_LOAD_A;
+                              else
+                                  gpl_next = GPL_LOAD_B0;
+                          end
             GPL_LOAD_A:  if (xbar_m1_grant && gpl_word == 2'd3 && gpl_row == 4'd15)
                                                             gpl_next = GPL_START;
             GPL_START:                                     gpl_next = GPL_WAIT;
@@ -716,7 +764,7 @@ module npu_top #(
     assign m2_wdata = gemm_wb_wdata;
     assign m2_wen   = gemm_wb_active;
 
-    assign gemm_b_in = gpl_b_buf[127:0];
+    assign gemm_b_in = gpl_b_feed_row[127:0];
 
     // ================================================================
     // Ping-pong buffer controllers
@@ -805,15 +853,19 @@ module npu_top #(
     // crossbar SRAM banks.  It must be reflected in npu_busy so that
     // firmware does not start the next DMA before the bridge finishes.
     logic bridge_busy;
+    logic gemm_preload_busy;
     assign bridge_busy = (dma_br_state != DMA_BR_IDLE);
+    assign gemm_preload_busy = (gpl_state != GPL_IDLE);
 
-    assign npu_busy = gemm_busy || valu_busy || sfu_busy || dma_busy || bridge_busy;
+    assign npu_busy = gemm_busy || valu_busy || sfu_busy || dma_busy ||
+                      bridge_busy || gemm_preload_busy;
 
     assign npu_going_idle = (gemm_busy && gemm_done)  ||
                             (valu_busy && valu_done)  ||
                             (dma_busy  && dma_done)   ||
                             (sfu_busy  && sfu_valid_out) ||
-                            (bridge_busy && dma_br_next == DMA_BR_IDLE);
+                            (bridge_busy && dma_br_next == DMA_BR_IDLE) ||
+                            (gemm_preload_busy && gpl_next == GPL_IDLE);
 
     // Debug signal pack (assigned here after all sub-signals are declared)
     assign debug_signals = {
