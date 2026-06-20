@@ -13,6 +13,7 @@ Final verdict: "E2E Stage 3 (DMA): PASS" or "FAIL — <error>"
 import os
 import cocotb
 from cocotb.clock import Clock
+from cocotb.handle import Force, Release
 from cocotb.triggers import RisingEdge, Timer, ClockCycles
 
 # ── Constants ────────────────────────────────────────────────────────────────
@@ -28,42 +29,74 @@ TIMEOUT_CYCLES = 2000000      # max cycles to wait for firmware UART
 
 # ── Helpers: DMA memory access via hierarchy ────────────────────────────────
 
-def _ext_word_mem(dut):
-    """Return ext_mem_model's 32-bit word array (u_dram.mem)."""
-    return dut.u_dram.mem
+async def _ext_write32(dut, word_addr, data):
+    """Write one 32-bit word through ext_mem_model's AXI debug write port."""
+    dut.axi_wr_addr.value = Force(word_addr & 0xFFFFFF)
+    dut.axi_wr_wdata.value = Force(data & 0xFFFFFFFF)
+    dut.axi_wr_en.value = Force(1)
+    await RisingEdge(dut.clk)
+    await Timer(1, unit="ps")
+    dut.axi_wr_en.value = Release()
+    dut.axi_wr_addr.value = Release()
+    dut.axi_wr_wdata.value = Release()
+    await Timer(1, unit="ps")
 
 
-def _sram(dut):
-    """Return DMA internal SRAM byte array (64 KB)."""
-    return dut.u_npu.u_dma.sram
+async def _ext_read32(dut, word_addr):
+    """Read one 32-bit word through ext_mem_model's AXI debug read port."""
+    dut.axi_rd_addr.value = Force(word_addr & 0xFFFFFF)
+    dut.axi_rd_en.value = Force(1)
+    await Timer(1, unit="ps")
+    val = int(dut.axi_rd_rdata.value) & 0xFFFFFFFF
+    dut.axi_rd_en.value = Release()
+    dut.axi_rd_addr.value = Release()
+    await Timer(1, unit="ps")
+    return val
 
 
-def _ext_write64(dut, word_addr, data):
+async def _ext_write64(dut, word_addr, data):
     """Write one 64-bit value to ext_mem at 32-bit word_addr.
     Stores as two consecutive 32-bit words (little-endian)."""
-    _ext_word_mem(dut)[word_addr].value     = data & 0xFFFFFFFF
-    _ext_word_mem(dut)[word_addr + 1].value = (data >> 32) & 0xFFFFFFFF
+    await _ext_write32(dut, word_addr, data & 0xFFFFFFFF)
+    await _ext_write32(dut, word_addr + 1, (data >> 32) & 0xFFFFFFFF)
 
 
-def _ext_read64(dut, word_addr):
+async def _ext_read64(dut, word_addr):
     """Read one 64-bit value from ext_mem at 32-bit word_addr.
     Returns int from two consecutive 32-bit words (little-endian)."""
-    lo = int(_ext_word_mem(dut)[word_addr].value)
-    hi = int(_ext_word_mem(dut)[word_addr + 1].value)
+    lo = await _ext_read32(dut, word_addr)
+    hi = await _ext_read32(dut, word_addr + 1)
     return (hi << 32) | lo
 
 
-def _sram_write64(dut, byte_addr, data):
-    """Write one 64-bit word to DMA SRAM at byte_addr."""
-    for b in range(8):
-        _sram(dut)[byte_addr + b].value = (data >> (b * 8)) & 0xFF
+async def _sram_write64(dut, byte_addr, data):
+    """Write one 64-bit word through the DMA SRAM simulation debug port."""
+    dut.u_npu.dma_sim_sram_en.value = Force(1)
+    dut.u_npu.dma_sim_sram_we.value = Force(1)
+    dut.u_npu.dma_sim_sram_addr.value = Force(byte_addr & 0xFFFF)
+    dut.u_npu.dma_sim_sram_wdata.value = Force(data & 0xFFFFFFFFFFFFFFFF)
+    await RisingEdge(dut.clk)
+    await Timer(1, unit="ps")
+    dut.u_npu.dma_sim_sram_en.value = Release()
+    dut.u_npu.dma_sim_sram_we.value = Release()
+    dut.u_npu.dma_sim_sram_addr.value = Release()
+    dut.u_npu.dma_sim_sram_wdata.value = Release()
+    await Timer(1, unit="ps")
 
 
-def _sram_read64(dut, byte_addr):
-    """Read one 64-bit word from DMA SRAM at byte_addr.  Returns int."""
-    val = 0
-    for b in range(8):
-        val |= int(_sram(dut)[byte_addr + b].value) << (b * 8)
+async def _sram_read64(dut, byte_addr):
+    """Read one 64-bit word through the DMA SRAM simulation debug port."""
+    dut.u_npu.dma_sim_sram_en.value = Force(1)
+    dut.u_npu.dma_sim_sram_we.value = Force(0)
+    dut.u_npu.dma_sim_sram_addr.value = Force(byte_addr & 0xFFFF)
+    await RisingEdge(dut.clk)
+    await RisingEdge(dut.clk)
+    await Timer(1, unit="ps")
+    val = int(dut.u_npu.dma_sim_sram_rdata.value) & 0xFFFFFFFFFFFFFFFF
+    dut.u_npu.dma_sim_sram_en.value = Release()
+    dut.u_npu.dma_sim_sram_we.value = Release()
+    dut.u_npu.dma_sim_sram_addr.value = Release()
+    await Timer(1, unit="ps")
     return val
 
 
@@ -207,13 +240,13 @@ async def run_dma_datapath_test(dut):
              f"[word 0x{EXT_SRC_WORD:04X}]")
     for i, val in enumerate(pattern):
         word_addr = EXT_SRC_WORD + i * 2  # 2 words per 64-bit value
-        _ext_write64(dut, word_addr, val)
+        await _ext_write64(dut, word_addr, val)
 
     # ── Step 2: Read back ext_mem and verify ────────────────────────────
     log.info("Reading back ext_mem source region")
     for i, expected in enumerate(pattern):
         word_addr = EXT_SRC_WORD + i * 2
-        actual = _ext_read64(dut, word_addr)
+        actual = await _ext_read64(dut, word_addr)
         if actual != expected:
             msg = (f"ext_mem source verify: word {i}: "
                    f"expected 0x{expected:016X}, got 0x{actual:016X}")
@@ -234,15 +267,15 @@ async def run_dma_datapath_test(dut):
     for i in range(NUM_WORDS):
         word_addr = EXT_SRC_WORD + i * 2
         sram_byte = SRAM_BASE + i * 8
-        val = _ext_read64(dut, word_addr)
-        _sram_write64(dut, sram_byte, val)
+        val = await _ext_read64(dut, word_addr)
+        await _sram_write64(dut, sram_byte, val)
 
     # ── Step 4: Read back DMA SRAM and verify ───────────────────────────
     log.info("Reading back DMA SRAM")
     sram_errors = 0
     for i, expected in enumerate(pattern):
         byte_addr = SRAM_BASE + i * 8
-        actual = _sram_read64(dut, byte_addr)
+        actual = await _sram_read64(dut, byte_addr)
         if actual != expected:
             msg = (f"DMA SRAM verify: word {i}: "
                    f"expected 0x{expected:016X}, got 0x{actual:016X}")
@@ -261,15 +294,15 @@ async def run_dma_datapath_test(dut):
     for i in range(NUM_WORDS):
         sram_byte = SRAM_BASE + i * 8
         word_addr = EXT_DST_WORD + i * 2
-        val = _sram_read64(dut, sram_byte)
-        _ext_write64(dut, word_addr, val)
+        val = await _sram_read64(dut, sram_byte)
+        await _ext_write64(dut, word_addr, val)
 
     # ── Step 6: Read back ext_mem[EXT_DST] and compare ──────────────────
     log.info(f"Reading back ext_mem destination region [word 0x{EXT_DST_WORD:04X}]")
     dst_errors = 0
     for i, expected in enumerate(pattern):
         word_addr = EXT_DST_WORD + i * 2
-        actual = _ext_read64(dut, word_addr)
+        actual = await _ext_read64(dut, word_addr)
         if actual != expected:
             msg = (f"ext_mem dest verify: word {i}: "
                    f"expected 0x{expected:016X}, got 0x{actual:016X}")
@@ -303,14 +336,6 @@ async def test_e2e_dma(dut):
 
     # ── ext_mem is already initialized by $readmemh at time 0 ───────────
     # (no need to zero — that would wipe the firmware)
-
-    try:
-        for i in range(0, 0x1000, 8):
-            _sram_write64(dut, i, 0)
-    except AttributeError as e:
-        msg = f"Cannot access DMA SRAM hierarchy: {e}"
-        log.error(msg)
-        all_errors.append(msg)
 
     # ── Release reset — PicoRV32 starts executing firmware ───────────────
     dut.rst_n.value = 1
