@@ -105,6 +105,13 @@ module npu_top #(
     logic npu_busy;
     logic npu_going_idle;
 
+    // ================================================================
+    // Debug signal pack for CSR DEBUG register (0x60)
+    // (declaration up here so it is visible to the CSR instance;
+    //  the actual assignment lives at the bottom after all sub-signals)
+    // ================================================================
+    logic [31:0] debug_signals;
+
     csr u_csr (
         .clk,
         .rst_n,
@@ -808,10 +815,7 @@ module npu_top #(
                             (sfu_busy  && sfu_valid_out) ||
                             (bridge_busy && dma_br_next == DMA_BR_IDLE);
 
-    // ================================================================
-    // Debug signal pack for CSR DEBUG register (0x60)
-    // ================================================================
-    logic [31:0] debug_signals;
+    // Debug signal pack (assigned here after all sub-signals are declared)
     assign debug_signals = {
         20'd0,                              // [31:12] reserved
         npu_busy,                           // [11] aggregated busy

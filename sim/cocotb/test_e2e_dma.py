@@ -101,6 +101,76 @@ def _write_log(text):
         f.write(text + "\n")
 
 
+# ── Diagnostic dump (for self-diagnosis by subagents) ──────────────────────
+
+async def dump_diagnostics(dut, label=""):
+    """Print structured diagnostic markers that subagents can grep for."""
+    log = dut._log
+    log.info(f"[DIAG] === Diagnostic Dump {label} ===")
+
+    # 1. Clock and reset status
+    log.info(f"[DIAG] clk={int(dut.clk.value)} rst_n={int(dut.rst_n.value)}")
+
+    # 2. UART tx value
+    try:
+        log.info(f"[DIAG] uart_tx={int(dut.uart_tx.value)}")
+    except:
+        log.info(f"[DIAG] uart_tx=INVALID")
+
+    # 3. Try to read CSR_STATUS via VPI hierarchy (if accessible)
+    try:
+        csr_rdata = int(dut.u_npu.u_csr.rdata.value)
+        log.info(f"[DIAG] csr_rdata=0x{csr_rdata:08X}")
+    except Exception as e:
+        log.info(f"[DIAG] csr_rdata=N/A ({e})")
+
+    # 4. Try to read npu_busy signal via hierarchy
+    try:
+        npu_busy = int(dut.u_npu.npu_busy.value)
+        log.info(f"[DIAG] npu_busy={npu_busy}")
+    except:
+        log.info(f"[DIAG] npu_busy=N/A")
+
+    # 5. Try to read debug_signals if DEBUG CSR (0x60) is accessible
+    try:
+        debug_val = int(dut.u_npu.debug_signals.value)
+        log.info(f"[DIAG] debug_signals=0x{debug_val:08X}")
+        # Decode key bits for immediate visibility
+        gemm_busy  = (debug_val >> 0) & 1
+        valu_busy  = (debug_val >> 1) & 1
+        sfu_busy   = (debug_val >> 2) & 1
+        dma_busy   = (debug_val >> 3) & 1
+        bridge_busy= (debug_val >> 4) & 1
+        gpl_state  = (debug_val >> 5) & 7
+        dma_br_state=(debug_val >> 8) & 3
+        wb_active  = (debug_val >> 10) & 1
+        all_busy   = (debug_val >> 11) & 1
+        log.info(f"[DIAG] gemm_busy={gemm_busy} valu_busy={valu_busy} sfu_busy={sfu_busy} dma_busy={dma_busy} bridge_busy={bridge_busy}")
+        log.info(f"[DIAG] gpl_state={gpl_state} dma_br_state={dma_br_state} wb_active={wb_active} agg_busy={all_busy}")
+    except Exception as e:
+        log.info(f"[DIAG] debug_signals=N/A ({e})")
+
+    # 6. Check if PicoRV32 trap signal is asserted (CPU crash)
+    try:
+        trap = int(dut.u_cpu.trap_latched.value)
+        log.info(f"[DIAG] cpu_trap={trap}")
+    except:
+        try:
+            trap = int(dut.u_cpu.u_picorv32.trap.value)
+            log.info(f"[DIAG] cpu_trap={trap}")
+        except:
+            log.info(f"[DIAG] cpu_trap=N/A")
+
+    # 7. Check PC if accessible
+    try:
+        pc = int(dut.debug_pc.value)
+        log.info(f"[DIAG] debug_pc=0x{pc:08X}")
+    except:
+        log.info(f"[DIAG] debug_pc=N/A")
+
+    log.info(f"[DIAG] === End Diagnostic {label} ===")
+
+
 # ── DMA data-path exercise (via cocotb hierarchy) ──────────────────────────
 
 async def run_dma_datapath_test(dut):
@@ -228,15 +298,8 @@ async def test_e2e_dma(dut):
     dut.rst_n.value = 0
     await ClockCycles(dut.clk, 5)
 
-    # ── Pre-load ext_mem with zeroes (clean start) ──────────────────────
-    log.info("Pre-loading ext_mem with zeroes")
-    try:
-        for i in range(0, 0x400, 2):  # 2 words per 64-bit, 0x400 words = 4KB
-            _ext_write64(dut, i, 0)
-    except AttributeError as e:
-        msg = f"Cannot access ext_mem hierarchy (u_dram.mem): {e}"
-        log.error(msg)
-        all_errors.append(msg)
+    # ── ext_mem is already initialized by $readmemh at time 0 ───────────
+    # (no need to zero — that would wipe the firmware)
 
     try:
         for i in range(0, 0x1000, 8):
@@ -251,6 +314,9 @@ async def test_e2e_dma(dut):
     await RisingEdge(dut.clk)
     await Timer(1, unit="ps")
 
+    # ── Diagnostic dump post-reset ─────────────────────────────────────
+    await dump_diagnostics(dut, "post-reset")
+
     # ── Wait for firmware UART character ─────────────────────────────────
     log.info("Waiting for firmware UART output...")
     chars = await wait_uart_chars(dut, count=1, log=log)
@@ -262,6 +328,7 @@ async def test_e2e_dma(dut):
     # ── Check firmware result ────────────────────────────────────────────
     fw_pass = False
     if fw_char is None:
+        await dump_diagnostics(dut, "uart-timeout")
         msg = "Firmware timeout: no UART character received within 2M cycles"
         log.error(msg)
         all_errors.append(msg)
