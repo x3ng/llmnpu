@@ -227,7 +227,7 @@ test_e2e_gemm:
 	MODULE=test_e2e_gemm TOPLEVEL=top_soc \
 	VERILOG_SOURCES="$(E2E_RTL)" \
 	COMPILE_ARGS="-I$(REPO_ROOT)/rtl/include -f $(SIM_BUILD)/hex_def.f" \
-	$(MAKE) SIM=verilator EXTRA_ARGS="$(GEMM_EXTRA_ARGS)" MAKE="make -j4" 2>&1 | tee $(SIM_BUILD)/test.log
+	$(MAKE) SIM=verilator EXTRA_ARGS="$(GEMM_EXTRA_ARGS)" 2>&1 | tee $(SIM_BUILD)/test.log
 
 # ── E2E Full SoC Integration ──
 
