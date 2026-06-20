@@ -128,8 +128,8 @@ test_e2e_csr:
 	riscv32-none-elf-objcopy -O binary $(REPO_ROOT)/build/firmware_csr.elf \
 		$(REPO_ROOT)/build/firmware_csr.bin
 	@python3 -c "import sys; data=open('$(REPO_ROOT)/build/firmware_csr.bin','rb').read(); data+=b'\x00'*(-len(data)%4); [print(f'{int.from_bytes(data[i:i+4],\"little\"):08x}') for i in range(0,len(data),4)]" > $(REPO_ROOT)/build/firmware.hex
-	@mkdir -p $(PWD)/sim/verilog
-	cp $(REPO_ROOT)/build/firmware.hex $(PWD)/sim/verilog/firmware.hex
+	@mkdir -p $(SIM_BUILD)/sim/verilog
+	cp $(REPO_ROOT)/build/firmware.hex $(SIM_BUILD)/sim/verilog/firmware.hex
 	@echo "=== Launching cocotb CSR simulation ==="
 	@mkdir -p $(SIM_BUILD)
 	PYTHONPATH=$(PWD)/cocotb:$$PYTHONPATH \
@@ -177,8 +177,8 @@ test_e2e_boot:
 		$(REPO_ROOT)/build/fw_boot.bin
 	@echo "=== Converting firmware to hex ==="
 	@python3 -c "import sys; data=open('$(REPO_ROOT)/build/fw_boot.bin','rb').read(); data+=b'\x00'*(-len(data)%4); [print(f'{int.from_bytes(data[i:i+4],\"little\"):08x}') for i in range(0,len(data),4)]" > $(REPO_ROOT)/build/fw_boot.hex
-	@mkdir -p $(PWD)/sim/verilog
-	cp $(REPO_ROOT)/build/fw_boot.hex $(PWD)/sim/verilog/firmware.hex
+	@mkdir -p $(SIM_BUILD)/sim/verilog
+	cp $(REPO_ROOT)/build/fw_boot.hex $(SIM_BUILD)/sim/verilog/firmware.hex
 	@echo "=== Launching cocotb boot simulation ==="
 	@mkdir -p $(SIM_BUILD)
 	PYTHONPATH=$(PWD)/cocotb:$$PYTHONPATH \
@@ -239,8 +239,8 @@ test_e2e:
 	riscv32-none-elf-objcopy -O binary $(REPO_ROOT)/build/firmware_e2e.elf \
 		$(REPO_ROOT)/build/firmware_e2e.bin
 	@python3 -c "import sys; data=open('$(REPO_ROOT)/build/firmware_e2e.bin','rb').read(); data+=b'\x00'*(-len(data)%4); [print(f'{int.from_bytes(data[i:i+4],\"little\"):08x}') for i in range(0,len(data),4)]" > $(REPO_ROOT)/build/firmware.hex
-	@mkdir -p $(PWD)/sim/verilog
-	cp $(REPO_ROOT)/build/firmware.hex $(PWD)/sim/verilog/firmware.hex
+	@mkdir -p $(SIM_BUILD)/sim/verilog
+	cp $(REPO_ROOT)/build/firmware.hex $(SIM_BUILD)/sim/verilog/firmware.hex
 	@echo "=== Launching cocotb E2E simulation ==="
 	PYTHONPATH=$(PWD)/cocotb:$$PYTHONPATH \
 	MODULE=test_e2e TOPLEVEL=top_soc \
@@ -300,8 +300,8 @@ test_e2e_gemm:
 	riscv32-none-elf-objcopy -O binary $(REPO_ROOT)/build/firmware_gemm.elf \
 		$(REPO_ROOT)/build/firmware_gemm.bin
 	@python3 -c "import sys; data=open('$(REPO_ROOT)/build/firmware_gemm.bin','rb').read(); data+=b'\x00'*(-len(data)%4); [print(f'{int.from_bytes(data[i:i+4],\"little\"):08x}') for i in range(0,len(data),4)]" > $(REPO_ROOT)/build/firmware.hex
-	@mkdir -p $(PWD)/sim/verilog
-	cp $(REPO_ROOT)/build/firmware.hex $(PWD)/sim/verilog/firmware.hex
+	@mkdir -p $(SIM_BUILD)/sim/verilog
+	cp $(REPO_ROOT)/build/firmware.hex $(SIM_BUILD)/sim/verilog/firmware.hex
 	@echo "=== Launching cocotb E2E GEMM simulation ==="
 	@mkdir -p $(SIM_BUILD)
 	PYTHONPATH=$(PWD)/cocotb:$$PYTHONPATH \

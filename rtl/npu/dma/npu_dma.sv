@@ -231,6 +231,10 @@ module npu_dma #(
             state         <= S_IDLE;
             done          <= 1'b0;
             wrapper_start <= 1'b0;
+            r_mode        <= 2'd0;
+            r_ext_addr    <= 32'd0;
+            r_sram_addr   <= 16'd0;
+            r_length      <= 16'd0;
             xfer_cnt      <= 16'd0;
             total_words   <= 16'd0;
         end else begin

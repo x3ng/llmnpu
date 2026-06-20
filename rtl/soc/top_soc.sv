@@ -79,12 +79,30 @@ module top_soc (
     logic [31:0] mem_rdata;
     logic        mem_ready;
 
+    // AXI bridge → ext_mem_model direct access ports
+    logic [23:0] axi_rd_addr;
+    logic        axi_rd_en;
+    logic [31:0] axi_rd_rdata;
+    logic [23:0] axi_wr_addr;
+    logic [31:0] axi_wr_wdata;
+    logic        axi_wr_en;
+
     logic [31:0] cpu_irq;
     assign cpu_irq = {31'd0, npu_irq};
 
     // ============================================================
     // RISC-V Control Processor
     // ============================================================
+    // trap latch: captures PicoRV32 trap assertion (e.g. illegal insn)
+    logic cpu_trap;
+    logic trap_latched;
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n)
+            trap_latched <= 1'b0;
+        else if (cpu_trap)
+            trap_latched <= 1'b1;
+    end
+
     picorv32_wrapper u_cpu (
         .clk,
         .rst_n,
@@ -123,7 +141,7 @@ module top_soc (
         .extmem_wstrb   (extmem_wstrb),
         .extmem_rdata   (extmem_rdata),
         .extmem_ready   (extmem_ready),
-        .trap           ()
+        .trap           (cpu_trap)
     );
 
     // ============================================================
@@ -272,7 +290,13 @@ module top_soc (
         .wdata      (mem_wdata),
         .wstrb      (mem_wstrb),
         .rdata      (mem_rdata),
-        .ready      (mem_ready)
+        .ready      (mem_ready),
+        .axi_rd_addr,
+        .axi_rd_en,
+        .axi_rd_rdata,
+        .axi_wr_addr,
+        .axi_wr_wdata,
+        .axi_wr_en
     );
 
     // ================================================================
@@ -285,7 +309,7 @@ module top_soc (
     // Reads:  ext_mem reads are combinational (mem[addr] available
     //   immediately).  Two reads per 64-bit beat (low word, high word).
     // Writes: ext_mem writes are clocked.  Two writes per 64-bit beat.
-    //   Writes go directly to u_dram.mem[].
+    //   Writes use axi_wr_* ports (ext_mem_model latches on axi_wr_en).
     // ================================================================
 
     // ---- Address translation helper (pure combinational) ----
@@ -296,11 +320,11 @@ module top_soc (
     endfunction
 
     // ================================================================
-    // AXI Read Bridge
-    //
-    // States: IDLE → RD_LOW (read low word) → RD_HIGH (read high,
-    //   present rdata) → (wait rready, loop to RD_LOW for next beat)
+    // AXI Bridge — ext_mem_model port control (uses proper read/write
+    //   ports instead of hierarchical references)
     // ================================================================
+
+    // ---- AXI Read Bridge state type and variables ----
     typedef enum logic [1:0] {
         AR_IDLE  = 2'd0,
         AR_LOW   = 2'd1,
@@ -309,6 +333,25 @@ module top_soc (
     } ar_state_t;
 
     ar_state_t ar_state, ar_next;
+
+    // ---- AXI Write Bridge state type and variables ----
+    typedef enum logic [2:0] {
+        AW_IDLE   = 3'd0,
+        AW_WAIT_W = 3'd1,
+        AW_WR_LO  = 3'd2,
+        AW_WR_HI  = 3'd3,
+        AW_NEXT   = 3'd4,
+        AW_RESP   = 3'd5
+    } aw_state_t;
+
+    aw_state_t aw_state, aw_next;
+
+    // ================================================================
+    // AXI Read Bridge
+    //
+    // States: IDLE → RD_LOW (read low word) → RD_HIGH (read high,
+    //   present rdata) → (wait rready, loop to RD_LOW for next beat)
+    // ================================================================
     logic [7:0]  ar_beat;
     logic [7:0]  ar_len;
     logic [31:0] ar_addr;
@@ -332,8 +375,8 @@ module top_soc (
                     end
                 end
                 AR_LOW: begin
-                    // Read low word: u_dram.mem[to_word_addr(ar_addr)]
-                    ar_lo <= u_dram.mem[to_word_addr(ar_addr)];
+                    // Read low word via axi_rd_rdata (combinational port)
+                    ar_lo <= axi_rd_rdata;
                 end
                 AR_HIGH: begin
                     // Read high word (combinational), rdata presented via
@@ -381,8 +424,8 @@ module top_soc (
             ar_rlast  <= 1'b0;
         end else begin
             if (ar_state == AR_HIGH) begin
-                // Assemble: {high_word, low_word}
-                ar_rdata  <= {u_dram.mem[to_word_addr(ar_addr) + 24'd1], ar_lo};
+                // Assemble: {high_word from axi port, low_word from ar_lo}
+                ar_rdata  <= {axi_rd_rdata, ar_lo};
                 ar_rlast  <= (ar_beat == ar_len);
                 ar_rvalid <= 1'b1;
             end else if (ar_rvalid && dma_axi_rready) begin
@@ -399,24 +442,48 @@ module top_soc (
     // ================================================================
     // AXI Write Bridge
     //
-    // Accepts AXI writes and writes data into u_dram.mem[].
+    // Accepts AXI writes via axi_wr_* ports into ext_mem_model.
     // Two 32-bit writes per 64-bit beat.
     // ================================================================
-    typedef enum logic [2:0] {
-        AW_IDLE   = 3'd0,
-        AW_WAIT_W = 3'd1,   // wait for first wvalid
-        AW_WR_LO  = 3'd2,   // write low word (this cycle)
-        AW_WR_HI  = 3'd3,   // write high word (this cycle)
-        AW_NEXT   = 3'd4,   // check wlast, loop or finish
-        AW_RESP   = 3'd5    // assert bvalid
-    } aw_state_t;
-
-    aw_state_t aw_state, aw_next;
     logic [7:0]  aw_beat;
     logic [7:0]  aw_len;
     logic [31:0] aw_addr;
     logic [63:0] aw_buf;   // captured wdata for current beat
     logic        aw_wlast;  // captured wlast for current beat
+
+    // ================================================================
+    // AXI Bridge — ext_mem_model port control (uses proper read/write
+    //   ports instead of hierarchical references)
+    // ================================================================
+
+    // ---- Read port control (combinational) ----
+    always_comb begin
+        axi_rd_en   = 1'b0;
+        axi_rd_addr = 24'd0;
+        if (ar_state == AR_LOW) begin
+            axi_rd_en   = 1'b1;
+            axi_rd_addr = to_word_addr(ar_addr);
+        end else if (ar_state == AR_HIGH) begin
+            axi_rd_en   = 1'b1;
+            axi_rd_addr = to_word_addr(ar_addr) + 24'd1;
+        end
+    end
+
+    // ---- Write port control (combinational) ----
+    always_comb begin
+        axi_wr_en    = 1'b0;
+        axi_wr_addr  = 24'd0;
+        axi_wr_wdata = 32'd0;
+        if (aw_state == AW_WR_LO) begin
+            axi_wr_en    = 1'b1;
+            axi_wr_addr  = to_word_addr(aw_addr);
+            axi_wr_wdata = aw_buf[31:0];
+        end else if (aw_state == AW_WR_HI) begin
+            axi_wr_en    = 1'b1;
+            axi_wr_addr  = to_word_addr(aw_addr) + 24'd1;
+            axi_wr_wdata = aw_buf[63:32];
+        end
+    end
 
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -443,12 +510,11 @@ module top_soc (
                     end
                 end
                 AW_WR_LO: begin
-                    // Write low 32 bits
-                    u_dram.mem[to_word_addr(aw_addr)] <= aw_buf[31:0];
+                    // Write low 32 bits via axi_wr_* port (driven by
+                    // combinational block above, latched in ext_mem_model)
                 end
                 AW_WR_HI: begin
-                    // Write high 32 bits
-                    u_dram.mem[to_word_addr(aw_addr) + 24'd1] <= aw_buf[63:32];
+                    // Write high 32 bits via axi_wr_* port
                 end
                 AW_NEXT: begin
                     // Advance for next beat

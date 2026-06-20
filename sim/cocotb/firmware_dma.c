@@ -62,13 +62,13 @@ void main(void)
 
     // === DMA CSR register offsets (32-bit word addressing) ===
     // DMA_CSR0 at 0x20 : ext_addr[31:0]
-    // DMA_CSR1 at 0x24 : {sram_off[15:0], length[15:0]}   (packed per RTL)
-    // DMA_CSR2 at 0x28 : len  (write-only, not wired to DMA engine)
-    // DMA_CSR3 at 0x2C : ctrl (write-only, not wired to DMA engine)
+    // DMA_CSR1 at 0x28 : sram_addr[15:0]
+    // DMA_CSR2 at 0x30 : length[15:0]
+    // DMA_CSR3 at 0x38 : ctrl (bit[0]=start, bit[1]=is_store)
     #define CSR_DMA_CSR0  0x20u
-    #define CSR_DMA_CSR1  0x24u
-    #define CSR_DMA_CSR2  0x28u
-    #define CSR_DMA_CSR3  0x2Cu
+    #define CSR_DMA_CSR1  0x28u
+    #define CSR_DMA_CSR2  0x30u
+    #define CSR_DMA_CSR3  0x38u
 
     // -------------------------------------------------------
     // Stage 1: Write known pattern to ExtMem (0x40000000 area)
@@ -115,21 +115,21 @@ void main(void)
         rd_ext_addr = csr[CSR_DMA_CSR0 / 4u];
         if (rd_ext_addr != wr_ext_addr) errors++;
 
-        // DMA_CSR1 (0x24): {sram_off=0x0000, len=128}  (packed)
-        wr_csr1 = (0x0000u << 16) | 128u;
+        // DMA_CSR1 (0x28): sram_off = 0x0000
+        wr_csr1 = 0x0000u;
         csr[CSR_DMA_CSR1 / 4u] = wr_csr1;
         mem_fence();
         rd_csr1 = csr[CSR_DMA_CSR1 / 4u];
         if (rd_csr1 != wr_csr1) errors++;
 
-        // DMA_CSR2 (0x28): len = 128  (not wired to DMA engine)
+        // DMA_CSR2 (0x30): length = 128
         wr_csr2 = 128u;
         csr[CSR_DMA_CSR2 / 4u] = wr_csr2;
         mem_fence();
         rd_csr2 = csr[CSR_DMA_CSR2 / 4u];
         if (rd_csr2 != wr_csr2) errors++;
 
-        // DMA_CSR3 (0x2C): ctrl = 1 (START)  (not wired to DMA engine)
+        // DMA_CSR3 (0x38): ctrl = 1 (START)
         wr_csr3 = 1u;
         csr[CSR_DMA_CSR3 / 4u] = wr_csr3;
         mem_fence();

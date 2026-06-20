@@ -103,7 +103,7 @@ module picorv32_wrapper (
         .CATCH_ILLINSN   (1),
         .PROGADDR_RESET  (32'h0000_0000),
         .PROGADDR_IRQ    (32'h0000_0010),
-        .STACKADDR       (32'h0000_2000),
+        .STACKADDR       (32'h4400_0000),    // top of ExtMem DRAM (FW overrides in _start)
         .MASKED_IRQ      (32'h0000_0000),
         .LATCHED_IRQ     (32'hffff_ffff)
     ) u_picorv32 (

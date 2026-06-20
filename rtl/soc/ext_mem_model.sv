@@ -19,14 +19,24 @@ module ext_mem_model #(
     input  logic        clk,
     input  logic        rst_n,
 
-    // ---- SRAM-style interface ----
+    // ---- SRAM-style interface (CPU / crossbar) ----
     input  logic        req,
     input  logic        write,
     input  logic [23:0] addr,       // word address (0 .. 16M-1)
     input  logic [31:0] wdata,
     input  logic [ 3:0] wstrb,      // byte write strobes
     output logic [31:0] rdata,
-    output logic        ready
+    output logic        ready,
+
+    // ---- AXI bridge read port (combinational) ----
+    input  logic [23:0] axi_rd_addr,
+    input  logic        axi_rd_en,
+    output logic [31:0] axi_rd_rdata,
+
+    // ---- AXI bridge write port (clocked, full word) ----
+    input  logic [23:0] axi_wr_addr,
+    input  logic [31:0] axi_wr_wdata,
+    input  logic        axi_wr_en
 );
 
     // ================================================================
@@ -68,5 +78,18 @@ module ext_mem_model #(
     // Ready — asserted same cycle as request
     // ================================================================
     assign ready = req;
+
+    // ================================================================
+    // AXI bridge read port — combinational (0-cycle latency)
+    // ================================================================
+    assign axi_rd_rdata = axi_rd_en ? mem[axi_rd_addr] : 32'd0;
+
+    // ================================================================
+    // AXI bridge write port — clocked, full 32-bit word
+    // ================================================================
+    always_ff @(posedge clk) begin
+        if (axi_wr_en)
+            mem[axi_wr_addr] <= axi_wr_wdata;
+    end
 
 endmodule

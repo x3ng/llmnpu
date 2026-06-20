@@ -704,9 +704,12 @@ module npu_top #(
     assign gemm_wb_addr  = `OSRAM_BASE + {gemm_wb_cnt, 2'b00};
     assign gemm_wb_wdata = wb_word_arr[gemm_wb_cnt];
 
-    assign m2_req   = valu_busy || sfu_busy || gemm_wb_active;
-    assign m2_addr  = gemm_wb_active ? gemm_wb_addr : `OSRAM_BASE;
-    assign m2_wdata = gemm_wb_active ? gemm_wb_wdata : 32'd0;
+    // M2 is exclusively used by GEMM writeback. VALU/SFU have no
+    // read-data path from M2; including them in m2_req causes useless
+    // OSRAM reads that contend with GEMM writeback and DMA bridge.
+    assign m2_req   = gemm_wb_active;
+    assign m2_addr  = gemm_wb_addr;
+    assign m2_wdata = gemm_wb_wdata;
     assign m2_wen   = gemm_wb_active;
 
     assign gemm_b_in = gpl_b_buf[127:0];
