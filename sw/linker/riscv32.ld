@@ -41,9 +41,6 @@ SECTIONS
         *(.sdata*)
     } > DRAM
 
-    /* ---- global pointer (gp) init value ----------------------- */
-    PROVIDE(__global_pointer$ = . + 0x800);
-
     /* ---- zero-initialised data -------------------------------- */
     .bss : {
         . = ALIGN(4);
