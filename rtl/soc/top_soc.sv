@@ -311,10 +311,9 @@ module top_soc (
     // ================================================================
 
     // ---- Address translation helper (pure combinational) ----
+    // byte_addr in 0x4000_0000..0x43FF_FFFF → word address 0..16M-1
     function automatic [23:0] to_word_addr(input [31:0] byte_addr);
-        logic [31:0] off;
-        off = byte_addr - 32'h4000_0000;
-        to_word_addr = off[25:2];
+        to_word_addr = 24'((byte_addr - 32'h4000_0000) >> 2);
     endfunction
 
     // ================================================================

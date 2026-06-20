@@ -205,6 +205,7 @@ void _start(void)
         ".option push\n\t"
         ".option norelax\n\t"
         "la   sp, __stack_top\n\t"
+        "la   gp, __global_pointer$\n\t"
         ".option pop\n\t"
     );
 
