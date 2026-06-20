@@ -16,7 +16,37 @@ include $(shell cocotb-config --makefiles)/Makefile.sim
 .PHONY: test_e2e test_e2e_csr test_e2e_boot test_e2e_gemm test_e2e_dma
 .PHONY: test_all clean
 
-# ── Individual test targets (each isolated, can run in parallel) ──
+# ── Shared variables for all E2E (SoC-level) targets ──
+
+E2E_RTL = \
+	$(REPO_ROOT)/rtl/soc/top_soc.sv \
+	$(REPO_ROOT)/rtl/soc/ext_mem_model.sv \
+	$(REPO_ROOT)/rtl/cpu/picorv32_adapted.v \
+	$(REPO_ROOT)/rtl/cpu/picorv32_wrapper.sv \
+	$(REPO_ROOT)/rtl/interconnect/axi_crossbar_soc.sv \
+	$(REPO_ROOT)/ref/verilog-axi/rtl/axi_dma_rd.v \
+		$(REPO_ROOT)/rtl/interconnect/axi_dma_wrapper.sv \
+	$(REPO_ROOT)/rtl/npu/top.sv \
+	$(REPO_ROOT)/rtl/npu/csr.sv \
+	$(REPO_ROOT)/rtl/npu/pingpong.sv \
+	$(REPO_ROOT)/rtl/npu/if_id/ifetch.sv \
+	$(REPO_ROOT)/rtl/npu/if_id/idecode.sv \
+	$(REPO_ROOT)/rtl/npu/if_id/dispatch.sv \
+	$(REPO_ROOT)/rtl/npu/if_id/if_id_top.sv \
+	$(REPO_ROOT)/rtl/npu/gemm/pe.sv \
+	$(REPO_ROOT)/rtl/npu/gemm/systolic_array.sv \
+	$(REPO_ROOT)/rtl/npu/gemm/gemm_controller.sv \
+	$(REPO_ROOT)/rtl/npu/valu/valu_lane.sv \
+	$(REPO_ROOT)/rtl/npu/valu/vregfile.sv \
+	$(REPO_ROOT)/rtl/npu/valu/valu_top.sv \
+	$(REPO_ROOT)/rtl/npu/sfu/lut_engine.sv \
+	$(REPO_ROOT)/rtl/npu/sfu/quant_dequant.sv \
+	$(REPO_ROOT)/rtl/npu/sfu/sfu_top.sv \
+	$(REPO_ROOT)/rtl/npu/dma/npu_dma.sv \
+	$(REPO_ROOT)/rtl/npu/memory/sram_bank.sv \
+	$(REPO_ROOT)/rtl/npu/memory/crossbar.sv
+
+# ── Individual unit test targets (each isolated, can run in parallel) ──
 
 test_pe: SIM_BUILD = sim_build_pe
 test_pe:
@@ -87,203 +117,71 @@ test_npu_top:
 	@rm -rf $(SIM_BUILD)
 	PYTHONPATH=$(PWD)/cocotb:$$PYTHONPATH \
 	MODULE=test_npu_top TOPLEVEL=npu_top \
-	VERILOG_SOURCES="\
-		$(REPO_ROOT)/rtl/npu/if_id/ifetch.sv \
-		$(REPO_ROOT)/rtl/npu/if_id/idecode.sv \
-		$(REPO_ROOT)/rtl/npu/if_id/dispatch.sv \
-		$(REPO_ROOT)/rtl/npu/if_id/if_id_top.sv \
-		$(REPO_ROOT)/rtl/npu/gemm/pe.sv \
-		$(REPO_ROOT)/rtl/npu/gemm/systolic_array.sv \
-		$(REPO_ROOT)/rtl/npu/gemm/gemm_controller.sv \
-		$(REPO_ROOT)/rtl/npu/valu/valu_lane.sv \
-		$(REPO_ROOT)/rtl/npu/valu/vregfile.sv \
-		$(REPO_ROOT)/rtl/npu/valu/valu_top.sv \
-		$(REPO_ROOT)/rtl/npu/sfu/lut_engine.sv \
-		$(REPO_ROOT)/rtl/npu/sfu/quant_dequant.sv \
-		$(REPO_ROOT)/rtl/npu/sfu/sfu_top.sv \
-		$(REPO_ROOT)/ref/verilog-axi/rtl/axi_dma_rd.v \
-		$(REPO_ROOT)/rtl/interconnect/axi_dma_wrapper.sv \
-		$(REPO_ROOT)/rtl/npu/dma/npu_dma.sv \
-		$(REPO_ROOT)/rtl/npu/memory/sram_bank.sv \
-		$(REPO_ROOT)/rtl/npu/memory/crossbar.sv \
-		$(REPO_ROOT)/rtl/npu/csr.sv \
-		$(REPO_ROOT)/rtl/npu/pingpong.sv \
-		$(REPO_ROOT)/rtl/npu/top.sv" \
+	VERILOG_SOURCES="$(E2E_RTL)" \
 	$(MAKE)
 
-# ── End-to-End Stage 2: CSR Read/Write ──────────────────────────────
-
-test_e2e_csr: SIM_BUILD = sim_build_csr
-test_e2e_csr:
-	@rm -rf $(SIM_BUILD)
-	@echo "=== Building CSR test firmware ==="
+# ── E2E helper: build RISC-V firmware and convert to hex ──
+# Usage: $(call build_fw,<target_name>,<c_sources>,<extra_gcc_flags>)
+define build_fw
+	@echo "=== Building $(1) firmware ==="
 	@mkdir -p $(REPO_ROOT)/build
-	riscv32-none-elf-gcc -march=rv32im -mabi=ilp32 -nostdlib -ffreestanding -O2 \
-		-c $(PWD)/cocotb/firmware_csr.c -o $(REPO_ROOT)/build/firmware_csr.o
-	riscv32-none-elf-gcc -march=rv32im -mabi=ilp32 -nostdlib \
+	riscv32-none-elf-gcc -march=rv32im -mabi=ilp32 -nostdlib -ffreestanding -O2 $(3) \
 		-T $(REPO_ROOT)/sw/linker/riscv32.ld \
-		-o $(REPO_ROOT)/build/firmware_csr.elf \
-		$(REPO_ROOT)/build/firmware_csr.o
-	@echo "=== Converting firmware to hex ==="
-	riscv32-none-elf-objcopy -O binary $(REPO_ROOT)/build/firmware_csr.elf \
-		$(REPO_ROOT)/build/firmware_csr.bin
-	@python3 -c "import sys; data=open('$(REPO_ROOT)/build/firmware_csr.bin','rb').read(); data+=b'\x00'*(-len(data)%4); [print(f'{int.from_bytes(data[i:i+4],\"little\"):08x}') for i in range(0,len(data),4)]" > $(REPO_ROOT)/build/firmware.hex
+		$(2) -o $(REPO_ROOT)/build/$(1).elf
+	riscv32-none-elf-objcopy -O binary $(REPO_ROOT)/build/$(1).elf $(REPO_ROOT)/build/$(1).bin
+	@python3 -c "import sys; data=open('$(REPO_ROOT)/build/$(1).bin','rb').read(); data+=b'\x00'*(-len(data)%4); [print(f'{int.from_bytes(data[i:i+4],\"little\"):08x}') for i in range(0,len(data),4)]" > $(REPO_ROOT)/build/$(1).hex
 	@mkdir -p $(SIM_BUILD)/sim/verilog
-	cp $(REPO_ROOT)/build/firmware.hex $(SIM_BUILD)/sim/verilog/firmware.hex
-	@echo "=== Launching cocotb CSR simulation ==="
-	@mkdir -p $(SIM_BUILD)
-	PYTHONPATH=$(PWD)/cocotb:$$PYTHONPATH \
-	MODULE=test_e2e_csr TOPLEVEL=top_soc \
-	VERILOG_SOURCES="\
-		$(REPO_ROOT)/rtl/soc/top_soc.sv \
-		$(REPO_ROOT)/rtl/soc/ext_mem_model.sv \
-		$(REPO_ROOT)/rtl/cpu/picorv32_adapted.v \
-		$(REPO_ROOT)/rtl/cpu/picorv32_wrapper.sv \
-		$(REPO_ROOT)/rtl/interconnect/axi_crossbar_soc.sv \
-		$(REPO_ROOT)/ref/verilog-axi/rtl/axi_dma_rd.v \
-			$(REPO_ROOT)/rtl/interconnect/axi_dma_wrapper.sv \
-		$(REPO_ROOT)/rtl/npu/top.sv \
-		$(REPO_ROOT)/rtl/npu/csr.sv \
-		$(REPO_ROOT)/rtl/npu/pingpong.sv \
-		$(REPO_ROOT)/rtl/npu/if_id/ifetch.sv \
-		$(REPO_ROOT)/rtl/npu/if_id/idecode.sv \
-		$(REPO_ROOT)/rtl/npu/if_id/dispatch.sv \
-		$(REPO_ROOT)/rtl/npu/if_id/if_id_top.sv \
-		$(REPO_ROOT)/rtl/npu/gemm/pe.sv \
-		$(REPO_ROOT)/rtl/npu/gemm/systolic_array.sv \
-		$(REPO_ROOT)/rtl/npu/gemm/gemm_controller.sv \
-		$(REPO_ROOT)/rtl/npu/valu/valu_lane.sv \
-		$(REPO_ROOT)/rtl/npu/valu/vregfile.sv \
-		$(REPO_ROOT)/rtl/npu/valu/valu_top.sv \
-		$(REPO_ROOT)/rtl/npu/sfu/lut_engine.sv \
-		$(REPO_ROOT)/rtl/npu/sfu/quant_dequant.sv \
-		$(REPO_ROOT)/rtl/npu/sfu/sfu_top.sv \
-		$(REPO_ROOT)/rtl/npu/dma/npu_dma.sv \
-		$(REPO_ROOT)/rtl/npu/memory/sram_bank.sv \
-		$(REPO_ROOT)/rtl/npu/memory/crossbar.sv" \
-	$(MAKE) 2>&1 | tee $(SIM_BUILD)/test.log
+	cp $(REPO_ROOT)/build/$(1).hex $(SIM_BUILD)/sim/verilog/firmware.hex
+endef
 
-# ââ End-to-End Stage 1: CPU Boot + UART âââââââââââââââââââââââââ
+# ── E2E Stage 1: CPU Boot ──
 
 test_e2e_boot: SIM_BUILD = sim_build_boot
+test_e2e_boot: export COMPILE_ARGS := $(COMPILE_ARGS) -Pext_mem_model.HEX_FILE="$(SIM_BUILD)/sim/verilog/firmware.hex"
 test_e2e_boot:
 	@rm -rf $(SIM_BUILD)
-	@echo "=== Building boot firmware ==="
-	@mkdir -p $(REPO_ROOT)/build
-	riscv32-none-elf-gcc -march=rv32im -mabi=ilp32 -nostdlib -ffreestanding -O2 \
-		-T $(REPO_ROOT)/sw/linker/riscv32.ld \
-		$(PWD)/cocotb/firmware_boot.c -o $(REPO_ROOT)/build/fw_boot.elf
-	riscv32-none-elf-objcopy -O binary $(REPO_ROOT)/build/fw_boot.elf \
-		$(REPO_ROOT)/build/fw_boot.bin
-	@echo "=== Converting firmware to hex ==="
-	@python3 -c "import sys; data=open('$(REPO_ROOT)/build/fw_boot.bin','rb').read(); data+=b'\x00'*(-len(data)%4); [print(f'{int.from_bytes(data[i:i+4],\"little\"):08x}') for i in range(0,len(data),4)]" > $(REPO_ROOT)/build/fw_boot.hex
-	@mkdir -p $(SIM_BUILD)/sim/verilog
-	cp $(REPO_ROOT)/build/fw_boot.hex $(SIM_BUILD)/sim/verilog/firmware.hex
-	@echo "=== Launching cocotb boot simulation ==="
-	@mkdir -p $(SIM_BUILD)
+	$(call build_fw,fw_boot,$(PWD)/cocotb/firmware_boot.c)
 	PYTHONPATH=$(PWD)/cocotb:$$PYTHONPATH \
 	MODULE=test_e2e_boot TOPLEVEL=top_soc \
-	VERILOG_SOURCES="\
-		$(REPO_ROOT)/rtl/soc/top_soc.sv \
-		$(REPO_ROOT)/rtl/soc/ext_mem_model.sv \
-		$(REPO_ROOT)/rtl/cpu/picorv32_adapted.v \
-		$(REPO_ROOT)/rtl/cpu/picorv32_wrapper.sv \
-		$(REPO_ROOT)/rtl/interconnect/axi_crossbar_soc.sv \
-		$(REPO_ROOT)/ref/verilog-axi/rtl/axi_dma_rd.v \
-			$(REPO_ROOT)/rtl/interconnect/axi_dma_wrapper.sv \
-		$(REPO_ROOT)/rtl/npu/top.sv \
-		$(REPO_ROOT)/rtl/npu/csr.sv \
-		$(REPO_ROOT)/rtl/npu/pingpong.sv \
-		$(REPO_ROOT)/rtl/npu/if_id/ifetch.sv \
-		$(REPO_ROOT)/rtl/npu/if_id/idecode.sv \
-		$(REPO_ROOT)/rtl/npu/if_id/dispatch.sv \
-		$(REPO_ROOT)/rtl/npu/if_id/if_id_top.sv \
-		$(REPO_ROOT)/rtl/npu/gemm/pe.sv \
-		$(REPO_ROOT)/rtl/npu/gemm/systolic_array.sv \
-		$(REPO_ROOT)/rtl/npu/gemm/gemm_controller.sv \
-		$(REPO_ROOT)/rtl/npu/valu/valu_lane.sv \
-		$(REPO_ROOT)/rtl/npu/valu/vregfile.sv \
-		$(REPO_ROOT)/rtl/npu/valu/valu_top.sv \
-		$(REPO_ROOT)/rtl/npu/sfu/lut_engine.sv \
-		$(REPO_ROOT)/rtl/npu/sfu/quant_dequant.sv \
-		$(REPO_ROOT)/rtl/npu/sfu/sfu_top.sv \
-		$(REPO_ROOT)/rtl/npu/dma/npu_dma.sv \
-		$(REPO_ROOT)/rtl/npu/memory/sram_bank.sv \
-		$(REPO_ROOT)/rtl/npu/memory/crossbar.sv" \
+	VERILOG_SOURCES="$(E2E_RTL)" \
 	$(MAKE) 2>&1 | tee $(SIM_BUILD)/test.log
 
-# ── End-to-End SoC Integration ──────────────────────────────────────
+# ── E2E Stage 2: CSR ──
 
-test_e2e: SIM_BUILD = sim_build_e2e
-test_e2e:
+test_e2e_csr: SIM_BUILD = sim_build_csr
+test_e2e_csr: export COMPILE_ARGS := $(COMPILE_ARGS) -Pext_mem_model.HEX_FILE="$(SIM_BUILD)/sim/verilog/firmware.hex"
+test_e2e_csr:
 	@rm -rf $(SIM_BUILD)
-	@echo "=== Building E2E firmware ==="
-	@mkdir -p $(REPO_ROOT)/build
-	@python3 $(REPO_ROOT)/tools/codegen/generate_golden.py --header > $(REPO_ROOT)/build/golden_gemm.h
-	riscv32-none-elf-gcc -march=rv32im -mabi=ilp32 -nostdlib -ffreestanding -O2 \
-		-I$(REPO_ROOT)/build -I$(REPO_ROOT)/sw/driver -I$(REPO_ROOT)/sw/runtime \
-		-c $(PWD)/cocotb/firmware_e2e.c -o $(REPO_ROOT)/build/firmware_e2e.o
-	riscv32-none-elf-gcc -march=rv32im -mabi=ilp32 -nostdlib -ffreestanding -O2 \
-		-I$(REPO_ROOT)/sw/driver -I$(REPO_ROOT)/sw/runtime \
-		-c $(REPO_ROOT)/sw/driver/npu_driver.c -o $(REPO_ROOT)/build/npu_driver_e2e.o
-	riscv32-none-elf-gcc -march=rv32im -mabi=ilp32 -nostdlib -ffreestanding -O2 \
-		-I$(REPO_ROOT)/sw/driver -I$(REPO_ROOT)/sw/runtime \
-		-c $(REPO_ROOT)/sw/runtime/npu_runtime.c -o $(REPO_ROOT)/build/npu_runtime_e2e.o
-	riscv32-none-elf-gcc -march=rv32im -mabi=ilp32 -nostdlib \
-		-T $(REPO_ROOT)/sw/linker/riscv32.ld \
-		-o $(REPO_ROOT)/build/firmware_e2e.elf \
-		$(REPO_ROOT)/build/firmware_e2e.o \
-		$(REPO_ROOT)/build/npu_driver_e2e.o \
-		$(REPO_ROOT)/build/npu_runtime_e2e.o
-	@echo "=== Converting firmware to hex ==="
-	riscv32-none-elf-objcopy -O binary $(REPO_ROOT)/build/firmware_e2e.elf \
-		$(REPO_ROOT)/build/firmware_e2e.bin
-	@python3 -c "import sys; data=open('$(REPO_ROOT)/build/firmware_e2e.bin','rb').read(); data+=b'\x00'*(-len(data)%4); [print(f'{int.from_bytes(data[i:i+4],\"little\"):08x}') for i in range(0,len(data),4)]" > $(REPO_ROOT)/build/firmware.hex
-	@mkdir -p $(SIM_BUILD)/sim/verilog
-	cp $(REPO_ROOT)/build/firmware.hex $(SIM_BUILD)/sim/verilog/firmware.hex
-	@echo "=== Launching cocotb E2E simulation ==="
+	$(call build_fw,firmware_csr,$(PWD)/cocotb/firmware_csr.c)
 	PYTHONPATH=$(PWD)/cocotb:$$PYTHONPATH \
-	MODULE=test_e2e TOPLEVEL=top_soc \
-	VERILOG_SOURCES="\
-		$(REPO_ROOT)/rtl/soc/top_soc.sv \
-		$(REPO_ROOT)/rtl/soc/ext_mem_model.sv \
-		$(REPO_ROOT)/rtl/cpu/picorv32_adapted.v \
-		$(REPO_ROOT)/rtl/cpu/picorv32_wrapper.sv \
-		$(REPO_ROOT)/rtl/interconnect/axi_crossbar_soc.sv \
-		$(REPO_ROOT)/ref/verilog-axi/rtl/axi_dma_rd.v \
-			$(REPO_ROOT)/rtl/interconnect/axi_dma_wrapper.sv \
-		$(REPO_ROOT)/rtl/npu/top.sv \
-		$(REPO_ROOT)/rtl/npu/csr.sv \
-		$(REPO_ROOT)/rtl/npu/pingpong.sv \
-		$(REPO_ROOT)/rtl/npu/if_id/ifetch.sv \
-		$(REPO_ROOT)/rtl/npu/if_id/idecode.sv \
-		$(REPO_ROOT)/rtl/npu/if_id/dispatch.sv \
-		$(REPO_ROOT)/rtl/npu/if_id/if_id_top.sv \
-		$(REPO_ROOT)/rtl/npu/gemm/pe.sv \
-		$(REPO_ROOT)/rtl/npu/gemm/systolic_array.sv \
-		$(REPO_ROOT)/rtl/npu/gemm/gemm_controller.sv \
-		$(REPO_ROOT)/rtl/npu/valu/valu_lane.sv \
-		$(REPO_ROOT)/rtl/npu/valu/vregfile.sv \
-		$(REPO_ROOT)/rtl/npu/valu/valu_top.sv \
-		$(REPO_ROOT)/rtl/npu/sfu/lut_engine.sv \
-		$(REPO_ROOT)/rtl/npu/sfu/quant_dequant.sv \
-		$(REPO_ROOT)/rtl/npu/sfu/sfu_top.sv \
-		$(REPO_ROOT)/rtl/npu/dma/npu_dma.sv \
-		$(REPO_ROOT)/rtl/npu/memory/sram_bank.sv \
-		$(REPO_ROOT)/rtl/npu/memory/crossbar.sv" \
-	$(MAKE)
+	MODULE=test_e2e_csr TOPLEVEL=top_soc \
+	VERILOG_SOURCES="$(E2E_RTL)" \
+	$(MAKE) 2>&1 | tee $(SIM_BUILD)/test.log
 
-# ── End-to-End Stage 4: Full NPU GEMM Execution ─────────────────────
+# ── E2E Stage 3: DMA ──
+
+test_e2e_dma: SIM_BUILD = sim_build_e2e_dma
+test_e2e_dma: export COMPILE_ARGS := $(COMPILE_ARGS) -Pext_mem_model.HEX_FILE="$(SIM_BUILD)/sim/verilog/firmware.hex"
+test_e2e_dma:
+	@rm -rf $(SIM_BUILD)
+	$(call build_fw,firmware_dma,$(PWD)/cocotb/firmware_dma.c,-std=gnu99)
+	PYTHONPATH=$(PWD)/cocotb:$$PYTHONPATH \
+	MODULE=test_e2e_dma TOPLEVEL=top_soc \
+	VERILOG_SOURCES="$(E2E_RTL)" \
+	$(MAKE) 2>&1 | tee $(SIM_BUILD)/test.log
+
+# ── E2E Stage 4: GEMM (Verilator) ──
 
 test_e2e_gemm: SIM_BUILD = sim_build_e2e_gemm
+test_e2e_gemm: SIM = verilator
+test_e2e_gemm: EXTRA_ARGS = -Wno-fatal
+test_e2e_gemm: export COMPILE_ARGS := $(COMPILE_ARGS) -I$(REPO_ROOT)/ref/picorv32 -Pext_mem_model.HEX_FILE="$(SIM_BUILD)/sim/verilog/firmware.hex"
 test_e2e_gemm:
 	@rm -rf $(SIM_BUILD)
-	@echo "=== Building E2E GEMM firmware ==="
-	@mkdir -p $(REPO_ROOT)/build
 	@python3 $(REPO_ROOT)/tools/codegen/generate_golden.py --header > $(REPO_ROOT)/build/golden_gemm.h
-	riscv32-none-elf-gcc -march=rv32im -mabi=ilp32 -nostdlib -ffreestanding -O2 \
-		-I$(REPO_ROOT)/build -I$(REPO_ROOT)/sw/driver -I$(REPO_ROOT)/sw/runtime \
-		-c $(PWD)/cocotb/firmware_gemm.c -o $(REPO_ROOT)/build/firmware_gemm.o
+	$(call build_fw,firmware_gemm, \
+		$(PWD)/cocotb/firmware_gemm.c, \
+		-I$(REPO_ROOT)/build -I$(REPO_ROOT)/sw/driver -I$(REPO_ROOT)/sw/runtime)
 	riscv32-none-elf-gcc -march=rv32im -mabi=ilp32 -nostdlib -ffreestanding -O2 \
 		-I$(REPO_ROOT)/sw/driver -I$(REPO_ROOT)/sw/runtime \
 		-c $(REPO_ROOT)/sw/driver/npu_driver.c -o $(REPO_ROOT)/build/npu_driver_gemm.o
@@ -296,96 +194,44 @@ test_e2e_gemm:
 		$(REPO_ROOT)/build/firmware_gemm.o \
 		$(REPO_ROOT)/build/npu_driver_gemm.o \
 		$(REPO_ROOT)/build/npu_runtime_gemm.o
-	@echo "=== Converting firmware to hex ==="
-	riscv32-none-elf-objcopy -O binary $(REPO_ROOT)/build/firmware_gemm.elf \
-		$(REPO_ROOT)/build/firmware_gemm.bin
-	@python3 -c "import sys; data=open('$(REPO_ROOT)/build/firmware_gemm.bin','rb').read(); data+=b'\x00'*(-len(data)%4); [print(f'{int.from_bytes(data[i:i+4],\"little\"):08x}') for i in range(0,len(data),4)]" > $(REPO_ROOT)/build/firmware.hex
+	riscv32-none-elf-objcopy -O binary $(REPO_ROOT)/build/firmware_gemm.elf $(REPO_ROOT)/build/firmware_gemm.bin
+	@python3 -c "import sys; data=open('$(REPO_ROOT)/build/firmware_gemm.bin','rb').read(); data+=b'\x00'*(-len(data)%4); [print(f'{int.from_bytes(data[i:i+4],\"little\"):08x}') for i in range(0,len(data),4)]" > $(REPO_ROOT)/build/firmware_gemm.hex
 	@mkdir -p $(SIM_BUILD)/sim/verilog
-	cp $(REPO_ROOT)/build/firmware.hex $(SIM_BUILD)/sim/verilog/firmware.hex
-	@echo "=== Launching cocotb E2E GEMM simulation ==="
-	@mkdir -p $(SIM_BUILD)
-		COMPILE_ARGS="$(COMPILE_ARGS) -Pext_mem_model.HEX_FILE=\"$(SIM_BUILD)/sim/verilog/firmware.hex\"" \
+	cp $(REPO_ROOT)/build/firmware_gemm.hex $(SIM_BUILD)/sim/verilog/firmware.hex
 	PYTHONPATH=$(PWD)/cocotb:$$PYTHONPATH \
 	MODULE=test_e2e_gemm TOPLEVEL=top_soc \
-	VERILOG_SOURCES="\
-		$(REPO_ROOT)/rtl/soc/top_soc.sv \
-		$(REPO_ROOT)/rtl/soc/ext_mem_model.sv \
-		$(REPO_ROOT)/rtl/cpu/picorv32_adapted.v \
-		$(REPO_ROOT)/rtl/cpu/picorv32_wrapper.sv \
-		$(REPO_ROOT)/rtl/interconnect/axi_crossbar_soc.sv \
-		$(REPO_ROOT)/ref/verilog-axi/rtl/axi_dma_rd.v \
-			$(REPO_ROOT)/rtl/interconnect/axi_dma_wrapper.sv \
-		$(REPO_ROOT)/rtl/npu/top.sv \
-		$(REPO_ROOT)/rtl/npu/csr.sv \
-		$(REPO_ROOT)/rtl/npu/pingpong.sv \
-		$(REPO_ROOT)/rtl/npu/if_id/ifetch.sv \
-		$(REPO_ROOT)/rtl/npu/if_id/idecode.sv \
-		$(REPO_ROOT)/rtl/npu/if_id/dispatch.sv \
-		$(REPO_ROOT)/rtl/npu/if_id/if_id_top.sv \
-		$(REPO_ROOT)/rtl/npu/gemm/pe.sv \
-		$(REPO_ROOT)/rtl/npu/gemm/systolic_array.sv \
-		$(REPO_ROOT)/rtl/npu/gemm/gemm_controller.sv \
-		$(REPO_ROOT)/rtl/npu/valu/valu_lane.sv \
-		$(REPO_ROOT)/rtl/npu/valu/vregfile.sv \
-		$(REPO_ROOT)/rtl/npu/valu/valu_top.sv \
-		$(REPO_ROOT)/rtl/npu/sfu/lut_engine.sv \
-		$(REPO_ROOT)/rtl/npu/sfu/quant_dequant.sv \
-		$(REPO_ROOT)/rtl/npu/sfu/sfu_top.sv \
-		$(REPO_ROOT)/rtl/npu/dma/npu_dma.sv \
-		$(REPO_ROOT)/rtl/npu/memory/sram_bank.sv \
-		$(REPO_ROOT)/rtl/npu/memory/crossbar.sv" \
-	$(MAKE) 2>&1 | tee $(SIM_BUILD)/test.log
+	VERILOG_SOURCES="$(E2E_RTL)" \
+	$(MAKE) SIM=$(SIM) EXTRA_ARGS="$(EXTRA_ARGS)" 2>&1 | tee $(SIM_BUILD)/test.log
 
-# ── End-to-End Stage 3: DMA Data Transfer ────────────────────────────
+# ── E2E Full SoC Integration ──
 
-test_e2e_dma: SIM_BUILD = sim_build_e2e_dma
-test_e2e_dma:
+test_e2e: SIM_BUILD = sim_build_e2e
+test_e2e: export COMPILE_ARGS := $(COMPILE_ARGS) -Pext_mem_model.HEX_FILE="$(SIM_BUILD)/sim/verilog/firmware.hex"
+test_e2e:
 	@rm -rf $(SIM_BUILD)
-	@echo "=== Building E2E DMA firmware ==="
-	@mkdir -p $(REPO_ROOT)/build
-	riscv32-none-elf-gcc -march=rv32im -mabi=ilp32 -nostdlib -ffreestanding -O2 -std=gnu99 \
-		-c $(PWD)/cocotb/firmware_dma.c -o $(REPO_ROOT)/build/firmware_dma.o
+	@python3 $(REPO_ROOT)/tools/codegen/generate_golden.py --header > $(REPO_ROOT)/build/golden_gemm.h
+	$(call build_fw,firmware_e2e, \
+		$(PWD)/cocotb/firmware_e2e.c, \
+		-I$(REPO_ROOT)/build -I$(REPO_ROOT)/sw/driver -I$(REPO_ROOT)/sw/runtime)
+	riscv32-none-elf-gcc -march=rv32im -mabi=ilp32 -nostdlib -ffreestanding -O2 \
+		-I$(REPO_ROOT)/sw/driver -I$(REPO_ROOT)/sw/runtime \
+		-c $(REPO_ROOT)/sw/driver/npu_driver.c -o $(REPO_ROOT)/build/npu_driver_e2e.o
+	riscv32-none-elf-gcc -march=rv32im -mabi=ilp32 -nostdlib -ffreestanding -O2 \
+		-I$(REPO_ROOT)/sw/driver -I$(REPO_ROOT)/sw/runtime \
+		-c $(REPO_ROOT)/sw/runtime/npu_runtime.c -o $(REPO_ROOT)/build/npu_runtime_e2e.o
 	riscv32-none-elf-gcc -march=rv32im -mabi=ilp32 -nostdlib \
 		-T $(REPO_ROOT)/sw/linker/riscv32.ld \
-		-o $(REPO_ROOT)/build/firmware_dma.elf \
-		$(REPO_ROOT)/build/firmware_dma.o
-	@echo "=== Converting firmware to hex ==="
-	riscv32-none-elf-objcopy -O binary $(REPO_ROOT)/build/firmware_dma.elf \
-		$(REPO_ROOT)/build/firmware_dma.bin
-	@python3 -c "import sys; data=open('$(REPO_ROOT)/build/firmware_dma.bin','rb').read(); data+=b'\x00'*(-len(data)%4); [print(f'{int.from_bytes(data[i:i+4],\"little\"):08x}') for i in range(0,len(data),4)]" > $(REPO_ROOT)/build/firmware.hex
+		-o $(REPO_ROOT)/build/firmware_e2e.elf \
+		$(REPO_ROOT)/build/firmware_e2e.o \
+		$(REPO_ROOT)/build/npu_driver_e2e.o \
+		$(REPO_ROOT)/build/npu_runtime_e2e.o
+	riscv32-none-elf-objcopy -O binary $(REPO_ROOT)/build/firmware_e2e.elf $(REPO_ROOT)/build/firmware_e2e.bin
+	@python3 -c "import sys; data=open('$(REPO_ROOT)/build/firmware_e2e.bin','rb').read(); data+=b'\x00'*(-len(data)%4); [print(f'{int.from_bytes(data[i:i+4],\"little\"):08x}') for i in range(0,len(data),4)]" > $(REPO_ROOT)/build/firmware_e2e.hex
 	@mkdir -p $(SIM_BUILD)/sim/verilog
-	cp $(REPO_ROOT)/build/firmware.hex $(SIM_BUILD)/sim/verilog/firmware.hex
-	@echo "=== Launching cocotb E2E DMA simulation ==="
-	@mkdir -p $(SIM_BUILD)
+	cp $(REPO_ROOT)/build/firmware_e2e.hex $(SIM_BUILD)/sim/verilog/firmware.hex
 	PYTHONPATH=$(PWD)/cocotb:$$PYTHONPATH \
-	MODULE=test_e2e_dma TOPLEVEL=top_soc \
-	VERILOG_SOURCES="\
-		$(REPO_ROOT)/rtl/soc/top_soc.sv \
-		$(REPO_ROOT)/rtl/soc/ext_mem_model.sv \
-		$(REPO_ROOT)/rtl/cpu/picorv32_adapted.v \
-		$(REPO_ROOT)/rtl/cpu/picorv32_wrapper.sv \
-		$(REPO_ROOT)/rtl/interconnect/axi_crossbar_soc.sv \
-		$(REPO_ROOT)/ref/verilog-axi/rtl/axi_dma_rd.v \
-			$(REPO_ROOT)/rtl/interconnect/axi_dma_wrapper.sv \
-		$(REPO_ROOT)/rtl/npu/top.sv \
-		$(REPO_ROOT)/rtl/npu/csr.sv \
-		$(REPO_ROOT)/rtl/npu/pingpong.sv \
-		$(REPO_ROOT)/rtl/npu/if_id/ifetch.sv \
-		$(REPO_ROOT)/rtl/npu/if_id/idecode.sv \
-		$(REPO_ROOT)/rtl/npu/if_id/dispatch.sv \
-		$(REPO_ROOT)/rtl/npu/if_id/if_id_top.sv \
-		$(REPO_ROOT)/rtl/npu/gemm/pe.sv \
-		$(REPO_ROOT)/rtl/npu/gemm/systolic_array.sv \
-		$(REPO_ROOT)/rtl/npu/gemm/gemm_controller.sv \
-		$(REPO_ROOT)/rtl/npu/valu/valu_lane.sv \
-		$(REPO_ROOT)/rtl/npu/valu/vregfile.sv \
-		$(REPO_ROOT)/rtl/npu/valu/valu_top.sv \
-		$(REPO_ROOT)/rtl/npu/sfu/lut_engine.sv \
-		$(REPO_ROOT)/rtl/npu/sfu/quant_dequant.sv \
-		$(REPO_ROOT)/rtl/npu/sfu/sfu_top.sv \
-		$(REPO_ROOT)/rtl/npu/dma/npu_dma.sv \
-		$(REPO_ROOT)/rtl/npu/memory/sram_bank.sv \
-		$(REPO_ROOT)/rtl/npu/memory/crossbar.sv" \
+	MODULE=test_e2e TOPLEVEL=top_soc \
+	VERILOG_SOURCES="$(E2E_RTL)" \
 	$(MAKE) 2>&1 | tee $(SIM_BUILD)/test.log
 
 # ── Batch targets ──
