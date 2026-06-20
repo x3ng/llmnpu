@@ -304,6 +304,7 @@ test_e2e_gemm:
 	cp $(REPO_ROOT)/build/firmware.hex $(SIM_BUILD)/sim/verilog/firmware.hex
 	@echo "=== Launching cocotb E2E GEMM simulation ==="
 	@mkdir -p $(SIM_BUILD)
+		COMPILE_ARGS="$(COMPILE_ARGS) -Pext_mem_model.HEX_FILE=\"$(SIM_BUILD)/sim/verilog/firmware.hex\"" \
 	PYTHONPATH=$(PWD)/cocotb:$$PYTHONPATH \
 	MODULE=test_e2e_gemm TOPLEVEL=top_soc \
 	VERILOG_SOURCES="\
