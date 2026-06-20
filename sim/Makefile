@@ -184,7 +184,13 @@ test_e2e_gemm: SIM = verilator
 # target-specific variable scoping issues with recursive make.
 GEMM_EXTRA_ARGS = -Wno-fatal -Wno-CASEINCOMPLETE -Wno-PINMISSING -Wno-TIMESCALEMOD -Wno-CASEOVERLAP -Wno-WIDTHEXPAND -Wno-WIDTHTRUNC
 test_e2e_gemm:
-	@rm -rf $(SIM_BUILD)
+	@# Only clean if RTL changed or Vtop missing (Verilator compile = 20-40 min)
+	@if [ -f $(SIM_BUILD)/Vtop ] && git diff --quiet HEAD -- rtl/ 2>/dev/null; then \
+		echo "=== Vtop exists RTL unchanged, reusing build ==="; \
+	else \
+		echo "=== RTL changed or no Vtop, rebuilding ==="; \
+		rm -rf $(SIM_BUILD); \
+	fi
 	@# Guard: GEMM requires Verilator; refuse if vvp is running
 	@# (temporarily disabled: false positive from parent bash cmdline containing 'vvp')
 	@#if pgrep -x vvp > /dev/null; then \
@@ -221,7 +227,7 @@ test_e2e_gemm:
 	MODULE=test_e2e_gemm TOPLEVEL=top_soc \
 	VERILOG_SOURCES="$(E2E_RTL)" \
 	COMPILE_ARGS="-I$(REPO_ROOT)/rtl/include -f $(SIM_BUILD)/hex_def.f" \
-	$(MAKE) SIM=verilator EXTRA_ARGS="$(GEMM_EXTRA_ARGS)" 2>&1 | tee $(SIM_BUILD)/test.log
+	$(MAKE) SIM=verilator EXTRA_ARGS="$(GEMM_EXTRA_ARGS)" MAKE="make -j4" 2>&1 | tee $(SIM_BUILD)/test.log
 
 # ── E2E Full SoC Integration ──
 
