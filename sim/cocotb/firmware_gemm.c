@@ -237,6 +237,7 @@ void main(void)
                           0x0000u + (uint32_t)(r * 16), 16, 0) != 0) {
                       fail = 1; break;
                     }
+                    uart_putc('a');
                   }
 
                   // Verify A-DMA CSRs post-transfer:
@@ -254,8 +255,9 @@ void main(void)
                     }
                   }
 
-                  if (fail) { pipeline_abort = 1; break; }
+                  if (fail) { uart_putc('a'); pipeline_abort = 1; break; }
                   a_dma_ok = 1;
+                  uart_putc('A');
               }
 
               // --------------------------------------------------
@@ -270,8 +272,9 @@ void main(void)
                       fail = 1; break;
                     }
                   }
-                  if (fail) { pipeline_abort = 1; break; }
+                  if (fail) { uart_putc('b'); pipeline_abort = 1; break; }
                   b_dma_ok = 1;
+                  uart_putc('B');
               }
 
               // --------------------------------------------------
@@ -305,8 +308,9 @@ void main(void)
                       }
                   }
 
-                  if (fail) { pipeline_abort = 1; break; }
+                  if (fail) { uart_putc('g'); pipeline_abort = 1; break; }
                   gemm_ok = 1;
+                  uart_putc('G');
               }
 
               // --------------------------------------------------
@@ -325,8 +329,9 @@ void main(void)
                       fail = 1; break;
                     }
                   }
-                  if (fail) { pipeline_abort = 1; break; }
+                  if (fail) { uart_putc('s'); pipeline_abort = 1; break; }
                   store_ok = 1;
+                  uart_putc('S');
               }
 
             }  // kt
@@ -334,11 +339,6 @@ void main(void)
         }  // mt
     }
 
-    // ---- Emit stage markers -------------------------------------------
-    uart_putc(a_dma_ok ? 'A' : 'a');
-    uart_putc(b_dma_ok ? 'B' : 'b');
-    uart_putc(gemm_ok  ? 'G' : 'g');
-    uart_putc(store_ok ? 'S' : 's');
 
     // ================================================================
     // Stage 6: Compare hardware result against golden

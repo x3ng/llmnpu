@@ -87,20 +87,6 @@ module npu_dma #(
     // --------------------------------------------------------
     reg [7:0] sram [0:65535];
 
-    // SRAM simulation debug write (sequential — clocked)
-    always_ff @(posedge clk) begin
-        if (sim_sram_en && sim_sram_we) begin
-            sram[sim_sram_addr  ] <= sim_sram_wdata[7:0];
-            sram[sim_sram_addr+1] <= sim_sram_wdata[15:8];
-            sram[sim_sram_addr+2] <= sim_sram_wdata[23:16];
-            sram[sim_sram_addr+3] <= sim_sram_wdata[31:24];
-            sram[sim_sram_addr+4] <= sim_sram_wdata[39:32];
-            sram[sim_sram_addr+5] <= sim_sram_wdata[47:40];
-            sram[sim_sram_addr+6] <= sim_sram_wdata[55:48];
-            sram[sim_sram_addr+7] <= sim_sram_wdata[63:56];
-        end
-    end
-
     // SRAM simulation debug read (registered — updated after NBA settles)
     reg [63:0] sram_rdata_reg;
     always_ff @(posedge clk or negedge rst_n) begin
@@ -298,6 +284,18 @@ module npu_dma #(
                     wrapper_start <= 1'b0;
                 end
             endcase
+
+            // Simulation debug SRAM write (merged into single always_ff)
+            if (sim_sram_en && sim_sram_we) begin
+                sram[sim_sram_addr  ] <= sim_sram_wdata[7:0];
+                sram[sim_sram_addr+1] <= sim_sram_wdata[15:8];
+                sram[sim_sram_addr+2] <= sim_sram_wdata[23:16];
+                sram[sim_sram_addr+3] <= sim_sram_wdata[31:24];
+                sram[sim_sram_addr+4] <= sim_sram_wdata[39:32];
+                sram[sim_sram_addr+5] <= sim_sram_wdata[47:40];
+                sram[sim_sram_addr+6] <= sim_sram_wdata[55:48];
+                sram[sim_sram_addr+7] <= sim_sram_wdata[63:56];
+            end
         end
     end
 

@@ -526,29 +526,6 @@ module npu_top #(
         endcase
     end
 
-    always_ff @(posedge clk) begin
-        if (gpl_state == GPL_LOAD_A && xbar_m1_grant) begin
-            case (gpl_row)
-                4'd0:  gpl_a_row0[gpl_word*32 +: 32]  <= xbar_m1_rdata;
-                4'd1:  gpl_a_row1[gpl_word*32 +: 32]  <= xbar_m1_rdata;
-                4'd2:  gpl_a_row2[gpl_word*32 +: 32]  <= xbar_m1_rdata;
-                4'd3:  gpl_a_row3[gpl_word*32 +: 32]  <= xbar_m1_rdata;
-                4'd4:  gpl_a_row4[gpl_word*32 +: 32]  <= xbar_m1_rdata;
-                4'd5:  gpl_a_row5[gpl_word*32 +: 32]  <= xbar_m1_rdata;
-                4'd6:  gpl_a_row6[gpl_word*32 +: 32]  <= xbar_m1_rdata;
-                4'd7:  gpl_a_row7[gpl_word*32 +: 32]  <= xbar_m1_rdata;
-                4'd8:  gpl_a_row8[gpl_word*32 +: 32]  <= xbar_m1_rdata;
-                4'd9:  gpl_a_row9[gpl_word*32 +: 32]  <= xbar_m1_rdata;
-                4'd10: gpl_a_row10[gpl_word*32 +: 32] <= xbar_m1_rdata;
-                4'd11: gpl_a_row11[gpl_word*32 +: 32] <= xbar_m1_rdata;
-                4'd12: gpl_a_row12[gpl_word*32 +: 32] <= xbar_m1_rdata;
-                4'd13: gpl_a_row13[gpl_word*32 +: 32] <= xbar_m1_rdata;
-                4'd14: gpl_a_row14[gpl_word*32 +: 32] <= xbar_m1_rdata;
-                4'd15: gpl_a_row15[gpl_word*32 +: 32] <= xbar_m1_rdata;
-            endcase
-        end
-    end
-
     always_comb begin
         case (gpl_feed_row)
             4'd0:  gemm_a_in = gpl_a_row0;
@@ -610,6 +587,25 @@ module npu_top #(
                 end
                 GPL_LOAD_A: begin
                     if (xbar_m1_grant) begin
+                        // Capture A matrix row data (merged from separate always_ff)
+                        case (gpl_row)
+                            4'd0:  gpl_a_row0[gpl_word*32 +: 32]  <= xbar_m1_rdata;
+                            4'd1:  gpl_a_row1[gpl_word*32 +: 32]  <= xbar_m1_rdata;
+                            4'd2:  gpl_a_row2[gpl_word*32 +: 32]  <= xbar_m1_rdata;
+                            4'd3:  gpl_a_row3[gpl_word*32 +: 32]  <= xbar_m1_rdata;
+                            4'd4:  gpl_a_row4[gpl_word*32 +: 32]  <= xbar_m1_rdata;
+                            4'd5:  gpl_a_row5[gpl_word*32 +: 32]  <= xbar_m1_rdata;
+                            4'd6:  gpl_a_row6[gpl_word*32 +: 32]  <= xbar_m1_rdata;
+                            4'd7:  gpl_a_row7[gpl_word*32 +: 32]  <= xbar_m1_rdata;
+                            4'd8:  gpl_a_row8[gpl_word*32 +: 32]  <= xbar_m1_rdata;
+                            4'd9:  gpl_a_row9[gpl_word*32 +: 32]  <= xbar_m1_rdata;
+                            4'd10: gpl_a_row10[gpl_word*32 +: 32] <= xbar_m1_rdata;
+                            4'd11: gpl_a_row11[gpl_word*32 +: 32] <= xbar_m1_rdata;
+                            4'd12: gpl_a_row12[gpl_word*32 +: 32] <= xbar_m1_rdata;
+                            4'd13: gpl_a_row13[gpl_word*32 +: 32] <= xbar_m1_rdata;
+                            4'd14: gpl_a_row14[gpl_word*32 +: 32] <= xbar_m1_rdata;
+                            4'd15: gpl_a_row15[gpl_word*32 +: 32] <= xbar_m1_rdata;
+                        endcase
                         if (gpl_word == 2'd3) begin
                             if (gpl_row < 4'd15)
                                 gpl_row <= gpl_row + 4'd1;
