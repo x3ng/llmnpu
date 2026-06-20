@@ -67,3 +67,5 @@ docs/superpowers/
 
 # --- Tool caches ---
 .ccache/
+a.out
+where_am_i.txt
