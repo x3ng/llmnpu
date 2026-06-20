@@ -18,6 +18,9 @@ module csr (
     input  logic        npu_busy,
     input  logic        npu_going_idle,
 
+    // Debug signals (exposed read-only via DEBUG register)
+    input  logic [31:0] debug_signals,
+
     // Control outputs to NPU
     output logic        npu_start,
     output logic        npu_rst,
@@ -51,6 +54,7 @@ module csr (
     localparam logic [9:0] A_IRQ_EN    = 10'h10;
     localparam logic [9:0] A_IRQ_STAT  = 10'h11;
     localparam logic [9:0] A_PERF_CYC  = 10'h20;
+    localparam logic [9:0] A_DEBUG     = 10'h18;   // byte 0x60
 
     // ----------------------------------------------------------------
     // Individual registers (no unpacked arrays for iverilog compat)
@@ -124,6 +128,7 @@ module csr (
             A_IRQ_EN:    rdata = irq_en_reg;
             A_IRQ_STAT:  rdata = irq_stat_reg;
             A_PERF_CYC:  rdata = perf_cycle_reg;
+            A_DEBUG:     rdata = debug_signals;
             default:     rdata = 32'd0;
         endcase
     end

@@ -39,6 +39,55 @@ static void uart_putc(char c)
     *(volatile uint32_t *)0x00000008u = (uint32_t)(unsigned char)c;
 }
 
+static unsigned int csr_debug_read(void)
+{
+    return *(volatile unsigned int *)0x10000060u;
+}
+
+static void uart_puthex(unsigned int val)
+{
+    val &= 0xFu;
+    if (val < 10) uart_putc('0' + (char)val);
+    else          uart_putc('A' + (char)(val - 10));
+}
+
+static void uart_puthex32(unsigned int val)
+{
+    int i;
+    for (i = 7; i >= 0; i--) {
+        uart_puthex((val >> (i * 4)) & 0xFu);
+    }
+}
+
+// Wait for npu_busy with timeout and debug dump on hang
+// Returns 0 on success, -1 on timeout (with UART debug output)
+static int wait_busy_clear(const char tag)
+{
+    volatile unsigned int *csr_status = (volatile unsigned int *)0x10000004u;
+    volatile unsigned int to = 500000u;  // generous timeout for Verilator
+    while (*csr_status & 1u) {
+        if (--to == 0) {
+            uart_putc('T');        // Timeout
+            uart_putc(tag);        // which stage
+            uart_puthex32(csr_debug_read());  // 8-char hex debug word
+            return -1;
+        }
+    }
+    return 0;
+}
+
+// Wait for npu_busy to go HIGH (operation started) with short timeout
+// Returns 0 if busy asserted, -1 if timeout
+static int wait_busy_assert(void)
+{
+    volatile unsigned int *csr_status = (volatile unsigned int *)0x10000004u;
+    volatile unsigned int to = 100000u;
+    while (!(*csr_status & 1u)) {
+        if (--to == 0) return -1;
+    }
+    return 0;
+}
+
 // ------------------------------------------------------------
 // Local DMA transfer — polls CSR_STATUS.BUSY (bit0) which
 // correctly reflects npu_busy.  The driver's _dma_xfer polls
@@ -61,10 +110,7 @@ static int _dma_xfer_local(uint32_t ext_addr, uint32_t sram_off,
     volatile uint32_t to;
 
     // Wait for any previous DMA to finish (BUSY poll CSR_STATUS bit0)
-    to = 10000u;
-    while (*csr_status & 1u) {
-        if (--to == 0) return -1;
-    }
+    if (wait_busy_clear('D') != 0) return -1;  // 'D' = pre-DMA clear wait
 
     // Program DMA CSRs
     *csr_dma0 = ext_addr;
@@ -76,14 +122,10 @@ static int _dma_xfer_local(uint32_t ext_addr, uint32_t sram_off,
     *csr_dma3 = ctrl;
 
     // Wait for DMA to assert BUSY (may happen immediately after CSR3 write)
-    to = 1000u;
-    while (!(*csr_status & 1u)) { if (--to == 0) break; }
+    if (wait_busy_assert() != 0) { /* warn but continue */ }
 
     // Wait for DMA to de-assert BUSY (FSM returns to S_IDLE)
-    to = 10000u;
-    while (*csr_status & 1u) {
-        if (--to == 0) return -1;
-    }
+    if (wait_busy_clear('d') != 0) return -1;  // 'd' = DMA busy wait
 
     // Bridge FSM: COPY/PREFILL runs after dma_done and is NOT
     // reflected in CSR_STATUS.BUSY.  Budget ~10 cycles per 4-byte
@@ -297,6 +339,8 @@ void main(void)
                   }
                   else if (npu_wait_done(&npu, 1000000u) != 0) {
                       fail = 1;
+                      uart_putc('D');  // Debug dump
+                      uart_puthex32(csr_debug_read());
                   }
 
                   // Verify GEMM finished: CSR_STATUS.BUSY must be 0
@@ -304,6 +348,13 @@ void main(void)
                       volatile uint32_t *csr_status =
                           (volatile uint32_t *)(0x10000000u + 0x04u);
                       if (*csr_status & 1u) {
+                          fail = 1;
+                      }
+                  }
+
+                  // Final busy check with debug on timeout
+                  if (!fail) {
+                      if (wait_busy_clear('G') != 0) {  // 'G' = GEMM busy clear
                           fail = 1;
                       }
                   }

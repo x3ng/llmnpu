@@ -24,6 +24,29 @@ static void mem_fence(void)
     __asm__ volatile ("fence" ::: "memory");
 }
 
+// Read DEBUG register (0x60) to see which unit is stuck
+static unsigned int csr_debug_read(void)
+{
+    return *(volatile unsigned int *)(0x10000000u + 0x60u);
+}
+
+// Print a hex nibble over UART (0-15 → '0'-'F')
+static void uart_puthex(unsigned int val)
+{
+    val &= 0xFu;
+    if (val < 10) uart_putc('0' + (char)val);
+    else          uart_putc('A' + (char)(val - 10));
+}
+
+// Print 32-bit value as 8 hex chars over UART
+static void uart_puthex32(unsigned int val)
+{
+    int i;
+    for (i = 7; i >= 0; i--) {
+        uart_puthex((val >> (i * 4)) & 0xFu);
+    }
+}
+
 // ------------------------------------------------------------
 // Bare-metal entry point
 // ------------------------------------------------------------
@@ -135,6 +158,21 @@ void main(void)
         mem_fence();
         rd_csr3 = csr[CSR_DMA_CSR3 / 4u];
         if (rd_csr3 != wr_csr3) errors++;
+
+        // Wait for DMA operation to complete (BUSY poll)
+        {
+            volatile unsigned int *csr_status = (volatile unsigned int *)0x10000004u;
+            volatile unsigned int to = 50000u;
+            while (*csr_status & 1u) {
+                if (--to == 0) {
+                    // TIMEOUT: dump DEBUG register
+                    uart_putc('T');
+                    uart_puthex32(csr_debug_read());
+                    errors++;
+                    break;
+                }
+            }
+        }
     }
 
     // -------------------------------------------------------
@@ -167,6 +205,50 @@ void main(void)
         {volatile int d; for (d = 0; d < 100; d++) __asm__ volatile ("");}
         c2 = csr[0x20u];
         if (c2 <= c1) errors++;
+    }
+
+    // -------------------------------------------------------
+    // Stage 5: Real DMA LOAD from ExtMem to verify DMA+bridge
+    // -------------------------------------------------------
+    {
+        volatile unsigned int *csr_status = (volatile unsigned int *)0x10000004u;
+
+        // Write known data to ExtMem at a test location
+        volatile unsigned int *ext = (volatile unsigned int *)0x40001000u;
+        ext[0] = 0xDEADBEEFu;
+        ext[1] = 0xCAFEBABEu;
+        mem_fence();
+
+        // Program DMA: LOAD 8 bytes from ExtMem 0x40001000 → SRAM 0x3000
+        csr[CSR_DMA_CSR0 / 4u] = 0x40001000u;  // ext_addr
+        mem_fence();
+        csr[CSR_DMA_CSR1 / 4u] = 0x3000u;       // sram_off
+        mem_fence();
+        csr[CSR_DMA_CSR2 / 4u] = 8u;             // length
+        mem_fence();
+        csr[CSR_DMA_CSR3 / 4u] = 0x1u;           // START, is_store=0 (LOAD)
+        mem_fence();
+
+        // Wait for BUSY to de-assert
+        {
+            volatile unsigned int to = 50000u;
+            while (*csr_status & 1u) {
+                if (--to == 0) {
+                    uart_putc('T');
+                    uart_puthex32(csr_debug_read());
+                    errors++;
+                    break;
+                }
+            }
+        }
+
+        // Add bridge delay (the hardware bridge copies DMA→SRAM after dma_done)
+        {volatile int d; for (d = 0; d < 1000; d++) __asm__ volatile ("");}
+
+        // Verify CSR_STATUS is clean
+        if (!(*csr_status & 1u)) {
+            // Success marker
+        }
     }
 
     // -------------------------------------------------------

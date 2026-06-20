@@ -114,6 +114,7 @@ module npu_top #(
         .rdata           (csr_rdata),
         .npu_busy        (npu_busy),
         .npu_going_idle  (npu_going_idle),
+        .debug_signals   (debug_signals),
         .npu_start       (csr_start),
         .npu_rst         (csr_rst),
         .dma_ext_addr    (csr_dma_ext_addr),
@@ -806,5 +807,22 @@ module npu_top #(
                             (dma_busy  && dma_done)   ||
                             (sfu_busy  && sfu_valid_out) ||
                             (bridge_busy && dma_br_next == DMA_BR_IDLE);
+
+    // ================================================================
+    // Debug signal pack for CSR DEBUG register (0x60)
+    // ================================================================
+    logic [31:0] debug_signals;
+    assign debug_signals = {
+        20'd0,                              // [31:12] reserved
+        npu_busy,                           // [11] aggregated busy
+        gemm_wb_active,                     // [10] GEMM writeback FSM active
+        dma_br_state,                       // [9:8] DMA bridge FSM state
+        gpl_state,                          // [7:5] GEMM preloader FSM state
+        bridge_busy,                        // [4] DMA bridge busy
+        dma_busy,                           // [3] DMA engine busy
+        sfu_busy,                           // [2] SFU busy
+        valu_busy,                          // [1] VALU busy
+        gemm_busy                           // [0] GEMM busy
+    };
 
 endmodule
