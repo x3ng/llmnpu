@@ -1,10 +1,9 @@
 // ============================================================
 // npu_runtime.c — NPU high-level operator implementation
 //
-// GEMM   : tiled across M / N / K in blocks of 16, using the NPU
-//          systolic array.  Each (mt, nt) output tile iterates
-//          over all kt input tiles, accumulating partial sums in
-//          O-SRAM via repeated OP_GEMM (hardware accumulate).
+// GEMM   : tiled across M / N in 16x16 output tiles.  For each output
+//          tile, up to 16 K-tiles (K<=256) are loaded as one slab and
+//          issued with a single GEMM descriptor.
 //
 // ReLU / GELU : load vector → SRAM, issue activation opcode,
 //          wait, DMA store result back.
@@ -59,6 +58,8 @@ int npu_rt_gemm(npu_dev_t *d, const npu_gemm_args_t *args)
     const int m_tiles = M / TILE_DIM;
     const int n_tiles = N / TILE_DIM;
     const int k_tiles = K / TILE_DIM;
+    if (k_tiles > 16)
+        return -11;  // current RTL descriptor path supports K<=256
 
     // --- walk output tiles ------------------------------------------
     for (int mt = 0; mt < m_tiles; mt++) {
@@ -67,57 +68,46 @@ int npu_rt_gemm(npu_dev_t *d, const npu_gemm_args_t *args)
         for (int nt = 0; nt < n_tiles; nt++) {
             const int n_off = nt * TILE_DIM;
 
-            // --- accumulate over k_tiles -----------------------------
-            for (int kt = 0; kt < k_tiles; kt++) {
-                const int k_off = kt * TILE_DIM;
-
-                // DMA load A tile → A-SRAM (row by row)
-                //   A[m_off + r][k_off .. k_off+15]  →  ASRAM_BASE + r*16
-                for (int r = 0; r < TILE_DIM; r++) {
-                    uint32_t ext_a = (uint32_t)(uintptr_t)(
-                        &A[(m_off + r) * K + k_off]);
-                    uint32_t sra   = ASRAM_BASE + (uint32_t)(r * TILE_DIM);
-                    if (npu_dma_ld(d, ext_a, sra, TILE_DIM) != 0)
-                        return -1;
-                }
-
-                // DMA load B tile → W-SRAM (row by row)
-                //   B[k_off + r][n_off .. n_off+15]  →  WSRAM_BASE + r*16
-                for (int r = 0; r < TILE_DIM; r++) {
-                    uint32_t ext_b = (uint32_t)(uintptr_t)(
-                        &B[(k_off + r) * N + n_off]);
-                    uint32_t srb   = WSRAM_BASE + (uint32_t)(r * TILE_DIM);
-                    if (npu_dma_ld(d, ext_b, srb, TILE_DIM) != 0)
-                        return -2;
-                }
-
-                // Build GEMM descriptor
-                gemm_desc_t desc;
-                memset(&desc, 0, sizeof(desc));
-                desc.M             = 1;   // 1 x 16 rows
-                desc.N             = 1;   // 1 x 16 cols
-                desc.K             = 1;   // 1 x 16 deep
-                desc.a_sram_bank   = BANK_A;
-                desc.b_sram_bank   = BANK_W;
-                desc.o_sram_bank   = BANK_O;
-                desc.a_zp          = (uint8_t)args->a_zp;
-                desc.b_zp          = (uint8_t)args->b_zp;
-                desc.out_scale_shr = args->out_scale_shr;
-                desc.out_scale_mul = (int16_t)args->out_scale_mul;
-
-                // Load descriptor into DSRAM
-                int desc_ptr = npu_load_descriptor(d, &desc, sizeof(desc));
-                if (desc_ptr < 0)
-                    return -3;
-
-                // Issue GEMM (hardware accumulates into O-SRAM)
-                if (npu_issue(d, OP_GEMM, (uint32_t)desc_ptr) != 0)
-                    return -4;
-
-                // Wait for GEMM completion
-                if (npu_wait_done(d, GEMM_TIMEOUT_US) != 0)
-                    return -5;
+            // DMA load A slab -> A-SRAM.  Each row stores K bytes
+            // contiguously so the GPL can feed K steps from one row buffer.
+            for (int r = 0; r < TILE_DIM; r++) {
+                uint32_t ext_a = (uint32_t)(uintptr_t)(&A[(m_off + r) * K]);
+                uint32_t sra = ASRAM_BASE + (uint32_t)(r * K);
+                if (npu_dma_ld(d, ext_a, sra, (uint32_t)K) != 0)
+                    return -1;
             }
+
+            // DMA load B slab -> W-SRAM as K rows of 16 columns.
+            for (int k = 0; k < K; k++) {
+                uint32_t ext_b = (uint32_t)(uintptr_t)(&B[k * N + n_off]);
+                uint32_t srb = WSRAM_BASE + (uint32_t)(k * TILE_DIM);
+                if (npu_dma_ld(d, ext_b, srb, TILE_DIM) != 0)
+                    return -2;
+            }
+
+            // Build and issue one GEMM descriptor for the whole K slab.
+            gemm_desc_t desc;
+            memset(&desc, 0, sizeof(desc));
+            desc.M             = 1;   // one 16-row output tile
+            desc.N             = 1;   // one 16-col output tile
+            desc.K             = (uint16_t)k_tiles;
+            desc.a_sram_bank   = BANK_A;
+            desc.b_sram_bank   = BANK_W;
+            desc.o_sram_bank   = BANK_O;
+            desc.a_zp          = (uint8_t)args->a_zp;
+            desc.b_zp          = (uint8_t)args->b_zp;
+            desc.out_scale_shr = args->out_scale_shr;
+            desc.out_scale_mul = (int16_t)args->out_scale_mul;
+
+            int desc_ptr = npu_load_descriptor(d, &desc, sizeof(desc));
+            if (desc_ptr < 0)
+                return -3;
+
+            if (npu_issue(d, OP_GEMM, (uint32_t)desc_ptr) != 0)
+                return -4;
+
+            if (npu_wait_done(d, GEMM_TIMEOUT_US) != 0)
+                return -5;
 
             // DMA store C tile from O-SRAM → external (row by row)
             //   O-SRAM[r*32 .. r*32+31]  →  C[m_off+r][n_off .. n_off+15]

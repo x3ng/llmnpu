@@ -1,7 +1,7 @@
 """test_e2e_gemm.py — E2E Stage 4: Full NPU GEMM Execution Test
 
 Loads the full SoC (top_soc) with firmware_gemm.c which performs
-a 16x16x16 INT8 GEMM via the NPU runtime, DMA STOREs the result
+a 16x16x32 INT8 GEMM with descriptor.K=2, DMA STOREs the result
 from O-SRAM to gemm_result in ext_mem, and compares all 256 output
 elements against a precomputed golden matrix embedded in firmware .rodata.
 
@@ -237,7 +237,8 @@ def ext_mem_read_bytes(dut, byte_addr, length):
 def _gen_golden_C():
     """Compute golden_C = A x B (int16) using Python for diagnostic
     comparison on test failure.  Matches the firmware's embedded golden_C
-    and test_A/test_B patterns."""
+    and test_A/test_B patterns.  Firmware loads the 16-deep base tile twice
+    along K, so this computes a 32-deep result with repeated slices."""
     import struct
     A = [[0]*16 for _ in range(16)]
     B = [[0]*16 for _ in range(16)]
@@ -249,8 +250,8 @@ def _gen_golden_C():
     for i in range(16):
         for j in range(16):
             acc = 0
-            for k in range(16):
-                acc += A[i][k] * B[k][j]
+            for k in range(32):
+                acc += A[i][k % 16] * B[k % 16][j]
             data.extend(struct.pack('<h', acc))
     return bytes(data)
 

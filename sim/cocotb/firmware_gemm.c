@@ -4,9 +4,9 @@
 // Exercises the complete GEMM data path:
 //   1. A[16][16] and B[16][16] in .rodata (ExtMem 0x40000000+)
 //   2. NPU init via npu_init (CSR base 0x10000000)
-//   3. npu_rt_gemm with M=N=K=16 (manual inlined flow)
+//   3. Manual GEMM flow with descriptor K=2 (16x16x32)
 //   4. DMA STORE result from O-SRAM to gemm_result[256] in ext_mem
-//   5. Compare gemm_result vs precomputed golden_C element-by-element
+//   5. Compare gemm_result vs 2x precomputed 16-deep golden_C
 //
 // Diagnostic UART output sequence (each stage always outputs):
 //   'I'=init OK / 'i'=init stuck busy
@@ -77,12 +77,12 @@ static int wait_busy_clear(const char tag)
 }
 
 // ------------------------------------------------------------
-// Test data — 16x16 INT8 GEMM
+// Test data — base 16x16 INT8 GEMM tile.  The E2E flow loads this tile
+// twice along K so descriptor.K=2 computes a 16x16x32 GEMM.
 //   A[i][j] = (i + j) % 7 - 3   (row-major, in .rodata)
 //   B[i][j] = (i * 3 + j) % 7 - 3
 //
-// Golden computed as C[i][j] = sum_k A[i][k] * B[k][j] (int16)
-//   precomputed and embedded as golden_C in .rodata
+// Golden for each 16-deep slice is precomputed in golden_C.
 // ------------------------------------------------------------
 static const int8_t test_A[256] __attribute__((aligned(4))) = {
      -3,  -2,  -1,   0,   1,   2,   3,  -3,  -2,  -1,   0,   1,   2,   3,  -3,  -2,
@@ -195,8 +195,10 @@ void main(void)
     // corresponding ok flag to 1.
     // ================================================================
     {
-        const int M = 16, N = 16, K = 16;
+        const int M = 16, N = 16, K = 32;
         const int m_tiles = 1, n_tiles = 1, k_tiles = 1;
+        const int src_k = 16;
+        const int desc_k_tiles = 2;
 
         int pipeline_abort = 0;
 
@@ -214,11 +216,14 @@ void main(void)
               {
                   int fail = 0;
                   for (int r = 0; r < 16; r++) {
-                    if (npu_dma_ld(&npu,
-                          (uint32_t)(uintptr_t)(&test_A[(m_off+r)*K + k_off]),
-                          0x0000u + (uint32_t)(r * 16), 16) != 0) {
-                      fail = 1; break;
+                    for (int kt_load = 0; kt_load < desc_k_tiles; kt_load++) {
+                      if (npu_dma_ld(&npu,
+                            (uint32_t)(uintptr_t)(&test_A[(m_off+r)*src_k]),
+                            0x0000u + (uint32_t)(r * K + kt_load * 16), 16) != 0) {
+                        fail = 1; break;
+                      }
                     }
+                    if (fail) break;
                     uart_putc('a');
                   }
 
@@ -248,11 +253,14 @@ void main(void)
               {
                   int fail = 0;
                   for (int r = 0; r < 16; r++) {
-                    if (npu_dma_ld(&npu,
-                          (uint32_t)(uintptr_t)(&test_B[(k_off+r)*N + n_off]),
-                          0x1000u + (uint32_t)(r * 16), 16) != 0) {
-                      fail = 1; break;
+                    for (int kt_load = 0; kt_load < desc_k_tiles; kt_load++) {
+                      if (npu_dma_ld(&npu,
+                            (uint32_t)(uintptr_t)(&test_B[r*N + n_off]),
+                            0x1000u + (uint32_t)((kt_load * 16 + r) * 16), 16) != 0) {
+                        fail = 1; break;
+                      }
                     }
+                    if (fail) break;
                   }
                   if (fail) { uart_putc('b'); pipeline_abort = 1; break; }
                   b_dma_ok = 1;
@@ -268,7 +276,7 @@ void main(void)
                   memset(&desc, 0, sizeof(desc));
                   desc.M = 1;             // one 16-row tile
                   desc.N = 1;             // one 16-col tile
-                  desc.K = 1;             // one 16-deep tile
+                  desc.K = 2;             // two 16-deep K tiles
                   desc.a_sram_bank = 0;   // ASRAM
                   desc.b_sram_bank = 1;   // WSRAM
                   desc.o_sram_bank = 2;   // OSRAM
@@ -341,11 +349,12 @@ void main(void)
     int16_t mismatch_gold[4];
 
     for (int i = 0; i < 256; i++) {
-        if (gemm_result[i] != golden_C[i]) {
+        int16_t expected = (int16_t)(golden_C[i] * 2);
+        if (gemm_result[i] != expected) {
             if (mismatches < 4) {
                 mismatch_idx[mismatches]  = i;
                 mismatch_hw[mismatches]   = gemm_result[i];
-                mismatch_gold[mismatches] = golden_C[i];
+                mismatch_gold[mismatches] = expected;
             }
             mismatches++;
         }
