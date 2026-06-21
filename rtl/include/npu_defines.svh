@@ -41,6 +41,15 @@ typedef logic [31:0] uint32_t;
 `define PP_VALU_SIZE    256
 `define PP_SFU_SIZE     256
 
+// --- O-SRAM ping-pong sub-window offsets (bytes) ---
+// Each window reserves two banks.  These offsets form the NPU module
+// contract used by DMA, descriptor engines, and later driver/runtime code.
+`define PP_GEMM_P_OFFSET    0
+`define PP_VALU_IN_OFFSET   (`PP_GEMM_P_SIZE * 2)
+`define PP_VALU_OUT_OFFSET  (`PP_VALU_IN_OFFSET + (`PP_VALU_SIZE * 2))
+`define PP_SFU_IN_OFFSET    (`PP_VALU_OUT_OFFSET + (`PP_VALU_SIZE * 2))
+`define PP_SFU_OUT_OFFSET   (`PP_SFU_IN_OFFSET + (`PP_SFU_SIZE * 2))
+
 // --- Crossbar master IDs ---
 `define XBAR_M_DMA    2'b00
 `define XBAR_M_GEMM   2'b01

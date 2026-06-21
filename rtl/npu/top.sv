@@ -248,8 +248,10 @@ module npu_top #(
     logic pp_gemm_b_fill_bank, pp_gemm_b_active_bank, pp_gemm_b_ready;
     logic pp_gemm_p_fill, pp_gemm_p_consume;
     logic pp_gemm_p_fill_bank, pp_gemm_p_active_bank, pp_gemm_p_ready;
-    logic pp_valu_fill, pp_valu_consume;
-    logic pp_valu_fill_bank, pp_valu_active_bank, pp_valu_ready;
+    logic pp_valu_in_fill, pp_valu_in_consume;
+    logic pp_valu_in_fill_bank, pp_valu_in_active_bank, pp_valu_in_ready;
+    logic pp_valu_out_fill, pp_valu_out_consume;
+    logic pp_valu_out_fill_bank, pp_valu_out_active_bank, pp_valu_out_ready;
     logic pp_sfu_in_fill, pp_sfu_in_consume;
     logic pp_sfu_in_fill_bank, pp_sfu_in_active_bank, pp_sfu_in_ready;
     logic pp_sfu_out_fill, pp_sfu_out_consume;
@@ -296,6 +298,8 @@ module npu_top #(
     logic [7:0]   valu_opcode, valu_opt;
     logic [4:0]   valu_rs1, valu_rs2, valu_rd;
     logic         valu_cmd_gated;
+    logic         valu_rf_busy, valu_rf_done;
+    logic         valu_mem_busy, valu_mem_done;
     logic         valu_done;
     logic [63:0][7:0] valu_test_wdata;
     logic [63:0][7:0] valu_test_rdata;
@@ -324,14 +328,17 @@ module npu_top #(
         .rs1         (valu_rs1),
         .rs2         (valu_rs2),
         .rd          (valu_rd),
-        .busy        (valu_busy),
-        .done        (valu_done),
+        .busy        (valu_rf_busy),
+        .done        (valu_rf_done),
         .test_wen    (dbg_valu_wen),
         .test_waddr  (dbg_valu_waddr),
         .test_wdata  (valu_test_wdata),
         .test_raddr  (dbg_valu_raddr),
         .test_rdata  (valu_test_rdata)
     );
+
+    assign valu_busy = valu_rf_busy || valu_mem_busy;
+    assign valu_done = valu_rf_done || valu_mem_done;
 
     // ================================================================
     // SFU — Special Function Unit
@@ -623,19 +630,23 @@ module npu_top #(
     wire dma_target_asram = (csr_dma_sram_addr[15:12] == 4'h0);
     wire dma_target_wsram = (csr_dma_sram_addr[15:12] == 4'h1);
     wire dma_target_osram = (csr_dma_sram_addr[15:12] == 4'h2);
-    localparam logic [15:0] PP_VALU_BASE_OFFSET    = (`PP_GEMM_P_SIZE * 2);
-    localparam logic [15:0] PP_SFU_IN_BASE_OFFSET  = PP_VALU_BASE_OFFSET + (`PP_VALU_SIZE * 2);
-    localparam logic [15:0] PP_SFU_OUT_BASE_OFFSET = PP_SFU_IN_BASE_OFFSET + (`PP_SFU_SIZE * 2);
+    localparam logic [15:0] PP_VALU_IN_BASE_OFFSET = `PP_VALU_IN_OFFSET;
+    localparam logic [15:0] PP_VALU_OUT_BASE_OFFSET= `PP_VALU_OUT_OFFSET;
+    localparam logic [15:0] PP_SFU_IN_BASE_OFFSET  = `PP_SFU_IN_OFFSET;
+    localparam logic [15:0] PP_SFU_OUT_BASE_OFFSET = `PP_SFU_OUT_OFFSET;
     localparam logic [15:0] PP_GEMM_A_BANK_OFFSET = `PP_GEMM_A_SIZE;
     localparam logic [15:0] PP_GEMM_B_BANK_OFFSET = `PP_GEMM_B_SIZE;
     localparam logic [15:0] PP_GEMM_P_BANK_OFFSET = `PP_GEMM_P_SIZE;
     localparam logic [15:0] PP_VALU_BANK_OFFSET = `PP_VALU_SIZE;
     localparam logic [15:0] PP_SFU_BANK_OFFSET  = `PP_SFU_SIZE;
     wire [15:0] dma_osram_offset = {4'd0, csr_dma_sram_addr[11:0]};
-    wire dma_target_gemm_p = dma_target_osram && (dma_osram_offset < PP_VALU_BASE_OFFSET);
-    wire dma_target_valu   = dma_target_osram &&
-                             (dma_osram_offset >= PP_VALU_BASE_OFFSET) &&
-                             (dma_osram_offset < PP_SFU_IN_BASE_OFFSET);
+    wire dma_target_gemm_p = dma_target_osram && (dma_osram_offset < PP_VALU_IN_BASE_OFFSET);
+    wire dma_target_valu_in = dma_target_osram &&
+                              (dma_osram_offset >= PP_VALU_IN_BASE_OFFSET) &&
+                              (dma_osram_offset < PP_VALU_OUT_BASE_OFFSET);
+    wire dma_target_valu_out = dma_target_osram &&
+                               (dma_osram_offset >= PP_VALU_OUT_BASE_OFFSET) &&
+                               (dma_osram_offset < PP_SFU_IN_BASE_OFFSET);
     wire dma_target_sfu_in = dma_target_osram &&
                              (dma_osram_offset >= PP_SFU_IN_BASE_OFFSET) &&
                              (dma_osram_offset < PP_SFU_OUT_BASE_OFFSET);
@@ -645,8 +656,10 @@ module npu_top #(
     wire [15:0] dma_gemm_a_fill_offset = pp_gemm_a_fill_bank ? PP_GEMM_A_BANK_OFFSET : 16'd0;
     wire [15:0] dma_gemm_b_fill_offset = pp_gemm_b_fill_bank ? PP_GEMM_B_BANK_OFFSET : 16'd0;
     wire [15:0] dma_gemm_p_active_offset = pp_gemm_p_active_bank ? PP_GEMM_P_BANK_OFFSET : 16'd0;
-    wire [15:0] dma_valu_fill_offset = pp_valu_fill_bank ? PP_VALU_BANK_OFFSET : 16'd0;
-    wire [15:0] dma_valu_active_offset = pp_valu_active_bank ? PP_VALU_BANK_OFFSET : 16'd0;
+    wire [15:0] dma_valu_in_fill_offset = pp_valu_in_fill_bank ? PP_VALU_BANK_OFFSET : 16'd0;
+    wire [15:0] dma_valu_out_active_offset = pp_valu_out_active_bank ? PP_VALU_BANK_OFFSET : 16'd0;
+    wire [15:0] valu_in_active_offset = pp_valu_in_active_bank ? PP_VALU_BANK_OFFSET : 16'd0;
+    wire [15:0] valu_out_fill_offset = pp_valu_out_fill_bank ? PP_VALU_BANK_OFFSET : 16'd0;
     wire [15:0] dma_sfu_in_fill_offset = pp_sfu_in_fill_bank ? PP_SFU_BANK_OFFSET : 16'd0;
     wire [15:0] dma_sfu_out_active_offset = pp_sfu_out_active_bank ? PP_SFU_BANK_OFFSET : 16'd0;
     wire [15:0] sfu_in_active_offset = pp_sfu_in_active_bank ? PP_SFU_BANK_OFFSET : 16'd0;
@@ -713,15 +726,15 @@ module npu_top #(
                 dma_br_xbar_addr_calc = dma_br_sram_addr_calc + {16'd0, dma_gemm_a_fill_offset};
             else if (dma_target_wsram)
                 dma_br_xbar_addr_calc = dma_br_sram_addr_calc + {16'd0, dma_gemm_b_fill_offset};
-            else if (dma_target_valu)
-                dma_br_xbar_addr_calc = dma_br_sram_addr_calc + {16'd0, dma_valu_fill_offset};
+            else if (dma_target_valu_in)
+                dma_br_xbar_addr_calc = dma_br_sram_addr_calc + {16'd0, dma_valu_in_fill_offset};
             else if (dma_target_sfu_in)
                 dma_br_xbar_addr_calc = dma_br_sram_addr_calc + {16'd0, dma_sfu_in_fill_offset};
         end else if (dma_br_state == DMA_BR_PREFILL) begin
             if (dma_target_gemm_p)
                 dma_br_xbar_addr_calc = dma_br_sram_addr_calc + {16'd0, dma_gemm_p_active_offset};
-            else if (dma_target_valu)
-                dma_br_xbar_addr_calc = dma_br_sram_addr_calc + {16'd0, dma_valu_active_offset};
+            else if (dma_target_valu_out)
+                dma_br_xbar_addr_calc = dma_br_sram_addr_calc + {16'd0, dma_valu_out_active_offset};
             else if (dma_target_sfu_out)
                 dma_br_xbar_addr_calc = dma_br_sram_addr_calc + {16'd0, dma_sfu_out_active_offset};
         end
@@ -1220,6 +1233,241 @@ module npu_top #(
     assign gemm_wb_wdata = wb_word_arr[gemm_wb_cnt];
 
     // ================================================================
+    // VALU descriptor-driven SRAM tile path
+    // ================================================================
+    typedef enum logic [3:0] {
+        VALU_MEM_IDLE   = 4'd0,
+        VALU_MEM_DESC0  = 4'd1,
+        VALU_MEM_DESC1  = 4'd2,
+        VALU_MEM_DESC2  = 4'd3,
+        VALU_MEM_DESC3  = 4'd4,
+        VALU_MEM_DESC4  = 4'd5,
+        VALU_MEM_DESC0W = 4'd6,
+        VALU_MEM_DESC1W = 4'd7,
+        VALU_MEM_DESC2W = 4'd8,
+        VALU_MEM_DESC3W = 4'd9,
+        VALU_MEM_DESC4W = 4'd10,
+        VALU_MEM_READ_A = 4'd11,
+        VALU_MEM_WAIT_A = 4'd12,
+        VALU_MEM_READ_B = 4'd13,
+        VALU_MEM_WAIT_B = 4'd14,
+        VALU_MEM_WRITE  = 4'd15
+    } valu_mem_state_t;
+
+    valu_mem_state_t valu_mem_state, valu_mem_next;
+    logic [15:0] valu_mem_desc_ptr;
+    logic [15:0] valu_mem_len;
+    logic [15:0] valu_mem_in0_base;
+    logic [15:0] valu_mem_in1_base;
+    logic [15:0] valu_mem_out_base;
+    logic [15:0] valu_mem_cnt;
+    logic [7:0]  valu_mem_opt;
+    logic        valu_mem_scalar_b;
+    logic [7:0]  valu_mem_scalar;
+    logic [31:0] valu_mem_a_word;
+    logic [31:0] valu_mem_b_word;
+    logic        valu_mem_req;
+    logic [15:0] valu_mem_addr;
+    logic [31:0] valu_mem_wdata;
+    logic        valu_mem_wen;
+    logic        csr_valu_mem_start;
+
+    assign csr_valu_mem_start = csr_start &&
+                                ((csr_issue_opcode == `OP_VADD) ||
+                                 (csr_issue_opcode == `OP_VMOV)) &&
+                                pp_valu_in_ready;
+
+    function automatic logic [7:0] valu_apply_byte(
+        input logic [7:0] opt,
+        input logic [7:0] a,
+        input logic [7:0] b
+    );
+        begin
+            unique case (opt[3:0])
+                4'h0: valu_apply_byte = $signed(a) + $signed(b);
+                4'h1: valu_apply_byte = $signed(a) - $signed(b);
+                4'h2: valu_apply_byte = $signed(a) * $signed(b);
+                4'h3: valu_apply_byte = ($signed(a) < $signed(b)) ? a : b;
+                4'h4: valu_apply_byte = ($signed(a) > $signed(b)) ? a : b;
+                4'h5: valu_apply_byte = a & b;
+                4'h6: valu_apply_byte = a | b;
+                4'h7: valu_apply_byte = a ^ b;
+                4'h8: valu_apply_byte = a << b[2:0];
+                4'h9: valu_apply_byte = $signed(a) >>> b[2:0];
+                4'hA: valu_apply_byte = (a != 8'd0) ? b : 8'd0;
+                default: valu_apply_byte = 8'd0;
+            endcase
+        end
+    endfunction
+
+    function automatic logic [31:0] valu_apply_word(
+        input logic [7:0] opt,
+        input logic [31:0] a,
+        input logic [31:0] b
+    );
+        begin
+            valu_apply_word = {
+                valu_apply_byte(opt, a[31:24], b[31:24]),
+                valu_apply_byte(opt, a[23:16], b[23:16]),
+                valu_apply_byte(opt, a[15:8],  b[15:8]),
+                valu_apply_byte(opt, a[7:0],   b[7:0])
+            };
+        end
+    endfunction
+
+    function automatic logic [15:0] valu_read_addr(input logic [15:0] base,
+                                                   input logic [15:0] cnt);
+        logic [15:0] off;
+        begin
+            off = {4'd0, base[11:0]};
+            if ((base[15:12] == 4'h2) &&
+                (off >= PP_VALU_IN_BASE_OFFSET) &&
+                (off < PP_VALU_OUT_BASE_OFFSET))
+                valu_read_addr = base + valu_in_active_offset + cnt;
+            else
+                valu_read_addr = base + cnt;
+        end
+    endfunction
+
+    function automatic logic [15:0] valu_write_addr(input logic [15:0] base,
+                                                    input logic [15:0] cnt);
+        logic [15:0] off;
+        begin
+            off = {4'd0, base[11:0]};
+            if ((base[15:12] == 4'h2) &&
+                (off >= PP_VALU_OUT_BASE_OFFSET) &&
+                (off < PP_SFU_IN_BASE_OFFSET))
+                valu_write_addr = base + valu_out_fill_offset + cnt;
+            else
+                valu_write_addr = base + cnt;
+        end
+    endfunction
+
+    always_ff @(posedge clk or negedge dp_rst_n) begin
+        if (!dp_rst_n) begin
+            valu_mem_state    <= VALU_MEM_IDLE;
+            valu_mem_desc_ptr <= `DSRAM_BASE;
+            valu_mem_len      <= `PP_VALU_SIZE;
+            valu_mem_in0_base <= `OSRAM_BASE + PP_VALU_IN_BASE_OFFSET;
+            valu_mem_in1_base <= `DSRAM_BASE;
+            valu_mem_out_base <= `OSRAM_BASE + PP_VALU_OUT_BASE_OFFSET;
+            valu_mem_cnt      <= 16'd0;
+            valu_mem_opt      <= `VOPT_ADD;
+            valu_mem_scalar_b <= 1'b0;
+            valu_mem_scalar   <= 8'd0;
+            valu_mem_a_word   <= 32'd0;
+            valu_mem_b_word   <= 32'd0;
+        end else begin
+            valu_mem_state <= valu_mem_next;
+            case (valu_mem_state)
+                VALU_MEM_IDLE: begin
+                    valu_mem_cnt <= 16'd0;
+                    if (csr_valu_mem_start) begin
+                        valu_mem_desc_ptr <= csr_desc_ptr[15:0];
+                        valu_mem_len      <= `PP_VALU_SIZE;
+                        valu_mem_in0_base <= `OSRAM_BASE + PP_VALU_IN_BASE_OFFSET;
+                        valu_mem_in1_base <= `DSRAM_BASE;
+                        valu_mem_out_base <= `OSRAM_BASE + PP_VALU_OUT_BASE_OFFSET;
+                        valu_mem_opt      <= `VOPT_ADD;
+                        valu_mem_scalar_b <= 1'b0;
+                        valu_mem_scalar   <= 8'd0;
+                    end
+                end
+                VALU_MEM_DESC0W: begin
+                    valu_mem_len      <= (xbar_m2_rdata[15:0] == 16'd0)
+                                       ? `PP_VALU_SIZE : xbar_m2_rdata[15:0];
+                    valu_mem_opt      <= xbar_m2_rdata[23:16];
+                    valu_mem_scalar_b <= xbar_m2_rdata[24];
+                end
+                VALU_MEM_DESC1W: valu_mem_in0_base <= xbar_m2_rdata[15:0];
+                VALU_MEM_DESC2W: valu_mem_in1_base <= xbar_m2_rdata[15:0];
+                VALU_MEM_DESC3W: valu_mem_out_base <= xbar_m2_rdata[15:0];
+                VALU_MEM_DESC4W: valu_mem_scalar   <= xbar_m2_rdata[7:0];
+                VALU_MEM_WAIT_A: begin
+                    valu_mem_a_word <= xbar_m2_rdata;
+                    if (valu_mem_scalar_b)
+                        valu_mem_b_word <= {4{valu_mem_scalar}};
+                end
+                VALU_MEM_WAIT_B: begin
+                    valu_mem_b_word <= xbar_m2_rdata;
+                end
+                VALU_MEM_WRITE: begin
+                    if (xbar_m2_grant) begin
+                        if (valu_mem_cnt + 16'd4 < valu_mem_len)
+                            valu_mem_cnt <= valu_mem_cnt + 16'd4;
+                    end
+                end
+                default: begin
+                end
+            endcase
+        end
+    end
+
+    always_comb begin
+        valu_mem_next = valu_mem_state;
+        case (valu_mem_state)
+            VALU_MEM_IDLE:   if (csr_valu_mem_start) valu_mem_next = VALU_MEM_DESC0;
+            VALU_MEM_DESC0:  if (xbar_m2_grant)      valu_mem_next = VALU_MEM_DESC0W;
+            VALU_MEM_DESC0W: valu_mem_next = VALU_MEM_DESC1;
+            VALU_MEM_DESC1:  if (xbar_m2_grant)      valu_mem_next = VALU_MEM_DESC1W;
+            VALU_MEM_DESC1W: valu_mem_next = VALU_MEM_DESC2;
+            VALU_MEM_DESC2:  if (xbar_m2_grant)      valu_mem_next = VALU_MEM_DESC2W;
+            VALU_MEM_DESC2W: valu_mem_next = VALU_MEM_DESC3;
+            VALU_MEM_DESC3:  if (xbar_m2_grant)      valu_mem_next = VALU_MEM_DESC3W;
+            VALU_MEM_DESC3W: valu_mem_next = VALU_MEM_DESC4;
+            VALU_MEM_DESC4:  if (xbar_m2_grant)      valu_mem_next = VALU_MEM_DESC4W;
+            VALU_MEM_DESC4W: valu_mem_next = VALU_MEM_READ_A;
+            VALU_MEM_READ_A: if (xbar_m2_grant)      valu_mem_next = VALU_MEM_WAIT_A;
+            VALU_MEM_WAIT_A: begin
+                if (valu_mem_scalar_b)
+                    valu_mem_next = VALU_MEM_WRITE;
+                else
+                    valu_mem_next = VALU_MEM_READ_B;
+            end
+            VALU_MEM_READ_B: if (xbar_m2_grant)      valu_mem_next = VALU_MEM_WAIT_B;
+            VALU_MEM_WAIT_B: valu_mem_next = VALU_MEM_WRITE;
+            VALU_MEM_WRITE:  if (xbar_m2_grant) begin
+                                  if (valu_mem_cnt + 16'd4 >= valu_mem_len)
+                                      valu_mem_next = VALU_MEM_IDLE;
+                                  else
+                                      valu_mem_next = VALU_MEM_READ_A;
+                              end
+            default: valu_mem_next = VALU_MEM_IDLE;
+        endcase
+    end
+
+    assign valu_mem_busy = (valu_mem_state != VALU_MEM_IDLE);
+    assign valu_mem_done = (valu_mem_state == VALU_MEM_WRITE) &&
+                           xbar_m2_grant &&
+                           (valu_mem_cnt + 16'd4 >= valu_mem_len);
+    assign valu_mem_req  = (valu_mem_state == VALU_MEM_DESC0) ||
+                           (valu_mem_state == VALU_MEM_DESC1) ||
+                           (valu_mem_state == VALU_MEM_DESC2) ||
+                           (valu_mem_state == VALU_MEM_DESC3) ||
+                           (valu_mem_state == VALU_MEM_DESC4) ||
+                           (valu_mem_state == VALU_MEM_READ_A) ||
+                           (valu_mem_state == VALU_MEM_READ_B) ||
+                           (valu_mem_state == VALU_MEM_WRITE);
+    always_comb begin
+        valu_mem_addr = 16'd0;
+        unique case (valu_mem_state)
+            VALU_MEM_DESC0:  valu_mem_addr = valu_mem_desc_ptr;
+            VALU_MEM_DESC1:  valu_mem_addr = valu_mem_desc_ptr + 16'd4;
+            VALU_MEM_DESC2:  valu_mem_addr = valu_mem_desc_ptr + 16'd8;
+            VALU_MEM_DESC3:  valu_mem_addr = valu_mem_desc_ptr + 16'd12;
+            VALU_MEM_DESC4:  valu_mem_addr = valu_mem_desc_ptr + 16'd16;
+            VALU_MEM_READ_A: valu_mem_addr = valu_read_addr(valu_mem_in0_base, valu_mem_cnt);
+            VALU_MEM_READ_B: valu_mem_addr = valu_read_addr(valu_mem_in1_base, valu_mem_cnt);
+            VALU_MEM_WRITE:  valu_mem_addr = valu_write_addr(valu_mem_out_base, valu_mem_cnt);
+            default:         valu_mem_addr = 16'd0;
+        endcase
+    end
+    assign valu_mem_wdata = valu_apply_word(valu_mem_opt, valu_mem_a_word,
+                                            valu_mem_scalar_b ? {4{valu_mem_scalar}} :
+                                                               valu_mem_b_word);
+    assign valu_mem_wen   = (valu_mem_state == VALU_MEM_WRITE);
+
+    // ================================================================
     // SFU P-buffer ReLU postprocess
     // ================================================================
     typedef enum logic [1:0] {
@@ -1333,10 +1581,13 @@ module npu_top #(
                              relu8(xbar_m2_rdata[7:0])};
     assign sfu_mem_wen   = (sfu_mem_state == SFU_MEM_WRITE);
 
-    assign m2_req   = gemm_wb_active || sfu_mem_req;
-    assign m2_addr  = gemm_wb_active ? gemm_wb_addr  : sfu_mem_addr;
-    assign m2_wdata = gemm_wb_active ? gemm_wb_wdata : sfu_mem_wdata;
-    assign m2_wen   = gemm_wb_active ? 1'b1          : sfu_mem_wen;
+    assign m2_req   = gemm_wb_active || sfu_mem_req || valu_mem_req;
+    assign m2_addr  = gemm_wb_active ? gemm_wb_addr  :
+                      sfu_mem_req    ? sfu_mem_addr  : valu_mem_addr;
+    assign m2_wdata = gemm_wb_active ? gemm_wb_wdata :
+                      sfu_mem_req    ? sfu_mem_wdata : valu_mem_wdata;
+    assign m2_wen   = gemm_wb_active ? 1'b1          :
+                      sfu_mem_req    ? sfu_mem_wen   : valu_mem_wen;
 
     // ================================================================
     // Ping-pong buffer controllers
@@ -1371,14 +1622,24 @@ module npu_top #(
         .ready        (pp_gemm_p_ready)
     );
 
-    pingpong #(.BUF_SIZE(`PP_VALU_SIZE)) u_pp_valu (
+    pingpong #(.BUF_SIZE(`PP_VALU_SIZE)) u_pp_valu_in (
         .clk,
         .rst_n        (dp_rst_n),
-        .fill_done    (pp_valu_fill),
-        .consume_done (pp_valu_consume),
-        .fill_bank    (pp_valu_fill_bank),
-        .active_bank  (pp_valu_active_bank),
-        .ready        (pp_valu_ready)
+        .fill_done    (pp_valu_in_fill),
+        .consume_done (pp_valu_in_consume),
+        .fill_bank    (pp_valu_in_fill_bank),
+        .active_bank  (pp_valu_in_active_bank),
+        .ready        (pp_valu_in_ready)
+    );
+
+    pingpong #(.BUF_SIZE(`PP_VALU_SIZE)) u_pp_valu_out (
+        .clk,
+        .rst_n        (dp_rst_n),
+        .fill_done    (pp_valu_out_fill),
+        .consume_done (pp_valu_out_consume),
+        .fill_bank    (pp_valu_out_fill_bank),
+        .active_bank  (pp_valu_out_active_bank),
+        .ready        (pp_valu_out_ready)
     );
 
     pingpong #(.BUF_SIZE(`PP_SFU_SIZE)) u_pp_sfu_in (
@@ -1409,8 +1670,10 @@ module npu_top #(
     assign pp_gemm_b_consume = gemm_done;
     assign pp_gemm_p_fill    = gemm_wb_done;
     assign pp_gemm_p_consume = prefill_done && dma_target_gemm_p;
-    assign pp_valu_fill      = dma_bridge_copy_done && dma_target_valu;
-    assign pp_valu_consume   = valu_done || (prefill_done && dma_target_valu);
+    assign pp_valu_in_fill   = dma_bridge_copy_done && dma_target_valu_in;
+    assign pp_valu_in_consume= valu_mem_done;
+    assign pp_valu_out_fill  = valu_mem_done;
+    assign pp_valu_out_consume= prefill_done && dma_target_valu_out;
     assign pp_sfu_in_fill    = dma_bridge_copy_done && dma_target_sfu_in;
     assign pp_sfu_in_consume = sfu_mem_relu_finish && !sfu_mem_is_p;
     assign pp_sfu_out_fill   = sfu_mem_relu_finish && !sfu_mem_is_p;

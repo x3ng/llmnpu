@@ -79,8 +79,9 @@ PP_GEMM_B_SIZE = 256
 PP_GEMM_P_SIZE = 512
 PP_VALU_SIZE = 256
 PP_SFU_SIZE = 256
-PP_VALU_BASE = OSRAM_BASE + (PP_GEMM_P_SIZE * 2)
-PP_SFU_IN_BASE = PP_VALU_BASE + (PP_VALU_SIZE * 2)
+PP_VALU_IN_BASE = OSRAM_BASE + (PP_GEMM_P_SIZE * 2)
+PP_VALU_OUT_BASE = PP_VALU_IN_BASE + (PP_VALU_SIZE * 2)
+PP_SFU_IN_BASE = PP_VALU_OUT_BASE + (PP_VALU_SIZE * 2)
 PP_SFU_OUT_BASE = PP_SFU_IN_BASE + (PP_SFU_SIZE * 2)
 
 
@@ -1125,7 +1126,7 @@ async def test_gemm_p_pingpong_writeback_and_dma_store_use_active_bank(dut):
 
 @cocotb.test()
 async def test_valu_pingpong_dma_window_roundtrip(dut):
-    """VALU ping-pong window: DMA LOAD fills banks, DMA STORE reads active banks."""
+    """VALU descriptor path consumes input banks and fills output banks."""
     await setup_dut(dut)
 
     dut.rst_n.value = 1
@@ -1144,40 +1145,72 @@ async def test_valu_pingpong_dma_window_roundtrip(dut):
     out1_ext = 0x00008700
     tile0 = [((i + 3) & 0xFF) for i in range(256)]
     tile1 = [((255 - i) & 0xFF) for i in range(256)]
+    rhs = [((i * 7 + 1) & 0x7F) for i in range(256)]
+    exp0 = [((tile0[i] + rhs[i]) & 0xFF) for i in range(256)]
+    exp1 = [((tile1[i] + rhs[i]) & 0xFF) for i in range(256)]
     dma_ext_write_bytes(dut, in0_ext, tile0)
     dma_ext_write_bytes(dut, in1_ext, tile1)
+    for i in range(64):
+        dsram_write_word(
+            dut,
+            DSRAM_BASE + 0x100 + i * 4,
+            rhs[i * 4] |
+            (rhs[i * 4 + 1] << 8) |
+            (rhs[i * 4 + 2] << 16) |
+            (rhs[i * 4 + 3] << 24),
+        )
     await Timer(1, unit="ps")
 
     load0_addrs = await start_dma_load_and_collect_copy_addrs(
-        dut, in0_ext, PP_VALU_BASE, 256, timeout_cycles=2200)
-    assert load0_addrs[0] == PP_VALU_BASE
-    assert load0_addrs[-1] == PP_VALU_BASE + 252
-    assert int(dut.pp_valu_ready.value) == 1
-    assert int(dut.pp_valu_active_bank.value) == 0
-    assert int(dut.pp_valu_fill_bank.value) == 1
+        dut, in0_ext, PP_VALU_IN_BASE, 256, timeout_cycles=2200)
+    assert load0_addrs[0] == PP_VALU_IN_BASE
+    assert load0_addrs[-1] == PP_VALU_IN_BASE + 252
+    assert int(dut.pp_valu_in_ready.value) == 1
+    assert int(dut.pp_valu_in_active_bank.value) == 0
+    assert int(dut.pp_valu_in_fill_bank.value) == 1
 
     load1_addrs = await start_dma_load_and_collect_copy_addrs(
-        dut, in1_ext, PP_VALU_BASE, 256, timeout_cycles=2200)
-    assert load1_addrs[0] == PP_VALU_BASE + PP_VALU_SIZE
-    assert load1_addrs[-1] == PP_VALU_BASE + PP_VALU_SIZE + 252
-    assert int(dut.pp_valu_active_bank.value) == 0
+        dut, in1_ext, PP_VALU_IN_BASE, 256, timeout_cycles=2200)
+    assert load1_addrs[0] == PP_VALU_IN_BASE + PP_VALU_SIZE
+    assert load1_addrs[-1] == PP_VALU_IN_BASE + PP_VALU_SIZE + 252
+    assert int(dut.pp_valu_in_active_bank.value) == 0
+
+    dsram_write_word(dut, DSRAM_BASE + 0, 0x00000000 | 256)
+    dsram_write_word(dut, DSRAM_BASE + 4, PP_VALU_IN_BASE)
+    dsram_write_word(dut, DSRAM_BASE + 8, DSRAM_BASE + 0x100)
+    dsram_write_word(dut, DSRAM_BASE + 12, PP_VALU_OUT_BASE)
+    dsram_write_word(dut, DSRAM_BASE + 16, 0)
+    await Timer(1, unit="ps")
+
+    await csr_write(dut, CSR_DESC_PTR, DSRAM_BASE)
+    await csr_write(dut, CSR_CTRL, ctrl_start(OP_VADD))
+    await wait_csr_idle_after_busy(dut, timeout_cycles=1800)
+    assert int(dut.pp_valu_in_active_bank.value) == 1
+    assert int(dut.pp_valu_out_ready.value) == 1
+    assert int(dut.pp_valu_out_active_bank.value) == 0
+
+    await csr_write(dut, CSR_CTRL, ctrl_start(OP_VADD))
+    await wait_csr_idle_after_busy(dut, timeout_cycles=1800)
+    assert int(dut.pp_valu_out_active_bank.value) == 0
 
     store0_addrs = await start_dma_store_and_collect_prefill_addrs(
-        dut, out0_ext, PP_VALU_BASE, 256, timeout_cycles=2200)
-    assert store0_addrs[0] == PP_VALU_BASE
-    assert store0_addrs[-1] == PP_VALU_BASE + 252
-    assert int(dut.pp_valu_active_bank.value) == 1
+        dut, out0_ext, PP_VALU_OUT_BASE, 256, timeout_cycles=2200)
+    assert store0_addrs[0] == PP_VALU_OUT_BASE
+    assert store0_addrs[-1] == PP_VALU_OUT_BASE + 252
+    assert int(dut.pp_valu_out_active_bank.value) == 1
 
     store1_addrs = await start_dma_store_and_collect_prefill_addrs(
-        dut, out1_ext, PP_VALU_BASE, 256, timeout_cycles=2200)
-    assert store1_addrs[0] == PP_VALU_BASE + PP_VALU_SIZE
-    assert store1_addrs[-1] == PP_VALU_BASE + PP_VALU_SIZE + 252
+        dut, out1_ext, PP_VALU_OUT_BASE, 256, timeout_cycles=2200)
+    assert store1_addrs[0] == PP_VALU_OUT_BASE + PP_VALU_SIZE
+    assert store1_addrs[-1] == PP_VALU_OUT_BASE + PP_VALU_SIZE + 252
 
     got0 = dma_ext_read_bytes(dut, out0_ext, 256)
     got1 = dma_ext_read_bytes(dut, out1_ext, 256)
-    assert got0 == tile0, "VALU bank0 DMA roundtrip changed data"
-    assert got1 == tile1, "VALU bank1 DMA roundtrip changed data"
-    dut._log.info("PASS: VALU ping-pong DMA window roundtrip")
+    mismatches0 = [(i, got0[i], exp0[i]) for i in range(256) if got0[i] != exp0[i]]
+    mismatches1 = [(i, got1[i], exp1[i]) for i in range(256) if got1[i] != exp1[i]]
+    assert not mismatches0, f"VALU tile0 descriptor mismatches: {mismatches0[:8]}"
+    assert not mismatches1, f"VALU tile1 descriptor mismatches: {mismatches1[:8]}"
+    dut._log.info("PASS: VALU descriptor ping-pong tile flow")
 
 
 @cocotb.test()

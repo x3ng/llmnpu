@@ -63,4 +63,28 @@ typedef struct packed {
     logic [7:0]  out_zp;
 } gemm_desc_t;
 
+// --- VALU Descriptor (20 bytes, 5 words) ---
+// CSR issue path consumes this descriptor from CSR_DESC_PTR:
+//   word0[15:0]  len_bytes, 0 means one 256B tile
+//   word0[23:16] VALU sub-opcode (`VOPT_*)
+//   word0[24]    use scalar_b from word4[7:0] instead of in1_addr
+//   word1[15:0]  in0 SRAM byte address
+//   word2[15:0]  in1 SRAM byte address
+//   word3[15:0]  out SRAM byte address
+//   word4[7:0]   scalar_b
+typedef struct packed {
+    logic [15:0] len_bytes;
+    logic [7:0]  opt;
+    logic        scalar_b;
+    logic [6:0]  reserved0;
+    logic [15:0] in0_addr;
+    logic [15:0] reserved1;
+    logic [15:0] in1_addr;
+    logic [15:0] reserved2;
+    logic [15:0] out_addr;
+    logic [15:0] reserved3;
+    logic [7:0]  scalar;
+    logic [23:0] reserved4;
+} valu_desc_t;
+
 `endif // ISA_DEFINES_SVH
