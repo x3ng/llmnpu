@@ -132,6 +132,43 @@ async def start_dma(dut, opcode, ext_addr, sram_addr, length,
         await RisingEdge(dut.clk)
 
 
+async def monitor_store_burst(dut, expected_words):
+    """Observe the wrapper AXI write contract for one STORE command."""
+    aw_lens = []
+    w_beats = 0
+    wlast_beats = []
+    remaining = expected_words
+    expected_aw_lens = []
+    expected_wlast_beats = []
+    cumulative = 0
+    while remaining:
+        burst_words = min(remaining, 256)
+        expected_aw_lens.append(burst_words - 1)
+        cumulative += burst_words
+        expected_wlast_beats.append(cumulative)
+        remaining -= burst_words
+
+    while not bool(dut.done.value):
+        await RisingEdge(dut.clk)
+        await Timer(1, unit="ps")
+        if int(dut.wrapper.dma_awvalid.value) and int(dut.wrapper.dma_awready.value):
+            aw_lens.append(int(dut.wrapper.dma_awlen.value))
+        if int(dut.wrapper.dma_wvalid.value) and int(dut.wrapper.dma_wready.value):
+            w_beats += 1
+            if int(dut.wrapper.dma_wlast.value):
+                wlast_beats.append(w_beats)
+
+    assert aw_lens == expected_aw_lens, (
+        f"STORE burst AWLEN mismatch: expected {expected_aw_lens}, got {aw_lens}"
+    )
+    assert w_beats == expected_words, (
+        f"STORE wrote {w_beats} beats, expected {expected_words}"
+    )
+    assert wlast_beats == expected_wlast_beats, (
+        f"WLAST beat mismatch: expected {expected_wlast_beats}, got {wlast_beats}"
+    )
+
+
 # ===========================================================================
 # Test 1: 1D DMA LOAD — ExtMem → SRAM
 # ===========================================================================
@@ -289,7 +326,9 @@ async def test_dma_1d_store(dut):
     # ------------------------------------------------------------------
     ext_base = 0x600
     length = num_words * 8  # 64 bytes
+    burst_monitor = cocotb.start_soon(monitor_store_burst(dut, num_words))
     await start_dma(dut, OP_DMA_ST, ext_base, sram_base, length)
+    await burst_monitor
 
     # ------------------------------------------------------------------
     # Read back from ExtMem and verify
@@ -304,6 +343,36 @@ async def test_dma_1d_store(dut):
         f"test_dma_1d_store PASS: {num_words} words, "
         f"sram=0x{sram_base:x} -> ext=0x{ext_base:x}, len={length}"
     )
+
+
+@cocotb.test()
+async def test_dma_store_splits_after_256_beats(dut):
+    """STORE larger than one AXI burst splits at the 256-beat boundary."""
+    clock = Clock(dut.clk, 2, unit="ns")
+    cocotb.start_soon(clock.start())
+
+    init_inputs(dut)
+    await reset_dut(dut)
+
+    num_words = 260
+    sram_base = 0x0800
+    ext_base = 0x1800
+    pattern = [((0xA500000000000000 | i) & ((1 << 64) - 1)) for i in range(num_words)]
+
+    for i, val in enumerate(pattern):
+        await sram_write(dut, sram_base + i * 8, val)
+
+    burst_monitor = cocotb.start_soon(monitor_store_burst(dut, num_words))
+    await start_dma(dut, OP_DMA_ST, ext_base, sram_base, num_words * 8)
+    await burst_monitor
+
+    for i in [0, 1, 255, 256, 259]:
+        actual = await ext_read(dut, ext_base + i * 8)
+        assert actual == pattern[i], (
+            f"Long STORE word {i}: expected 0x{pattern[i]:016x}, got 0x{actual:016x}"
+        )
+
+    dut._log.info("test_dma_store_splits_after_256_beats PASS: AWLEN=[255, 3]")
 
 
 # ===========================================================================

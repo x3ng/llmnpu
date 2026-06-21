@@ -2,7 +2,7 @@
 // axi_dma_wrapper.sv — Proper AXI DMA Wrapper
 //
 // Uses alexforencich/verilog-axi axi_dma_rd.v (MIT) for LOAD
-// and a simple AXI write FSM for STORE.
+// and a burst AXI write FSM for STORE.
 //
 // STANDALONE=1 (default): internal 64 KB AXI RAM responds to
 //   DMA engines — used in unit-level cocotb tests (test_dma,
@@ -231,21 +231,25 @@ module axi_dma_wrapper #(
         S_RD_START  = 3'd1,
         S_RD_XFER   = 3'd2,
         S_RD_DONE   = 3'd3,
-        S_WR_ACCEPT = 3'd4,
-        S_WR_AW     = 3'd5,
-        S_WR_W      = 3'd6,
-        S_WR_B      = 3'd7
+        S_WR_AW     = 3'd4,
+        S_WR_W      = 3'd5,
+        S_WR_B      = 3'd6
     } state_t;
 
     state_t state, next;
 
     logic [15:0] word_cnt;
-    logic [63:0] wr_buf;
+    logic [8:0]  wr_burst_words;
+    logic [8:0]  wr_burst_beat;
 
     // Total transfer count in 64-bit words (combinational)
     wire [15:0] total_words;
     assign total_words[12:0] = length[15:3];
     assign total_words[15:13] = 3'd0;
+    wire [15:0] wr_remaining_words = total_words - word_cnt;
+    wire [8:0]  wr_next_burst_words =
+        (wr_remaining_words >= 16'd256) ? 9'd256 :
+                                          {1'b0, wr_remaining_words[7:0]};
 
     // ------------------------------------------------------------
     // Read descriptor drive (combinational)
@@ -271,16 +275,15 @@ module axi_dma_wrapper #(
             xfer_active <= 1'b0;
             rd_data     <= 64'd0;
             rd_valid    <= 1'b0;
-            wr_ready    <= 1'b0;
             word_cnt    <= 16'd0;
-            wr_buf      <= 64'd0;
+            wr_burst_words <= 9'd0;
+            wr_burst_beat  <= 9'd0;
         end else begin
             state <= next;
 
             // Defaults
             done     <= 1'b0;
             rd_valid <= 1'b0;
-            wr_ready <= 1'b0;
 
             case (state)
                 S_IDLE: begin
@@ -306,25 +309,25 @@ module axi_dma_wrapper #(
                     done        <= 1'b1;
                 end
 
-                S_WR_ACCEPT: begin
-                    xfer_active <= 1'b1;
-                    wr_ready    <= 1'b1;
-                    wr_buf      <= wr_data;
-                end
-
                 S_WR_AW: begin
                     xfer_active <= 1'b1;
+                    if (dma_awvalid && dma_awready) begin
+                        wr_burst_words <= wr_next_burst_words;
+                        wr_burst_beat  <= 9'd0;
+                    end
                 end
 
                 S_WR_W: begin
                     xfer_active <= 1'b1;
+                    if (dma_wvalid && dma_wready) begin
+                        word_cnt <= word_cnt + 16'd1;
+                        if (wr_burst_beat + 9'd1 < wr_burst_words)
+                            wr_burst_beat <= wr_burst_beat + 9'd1;
+                    end
                 end
 
                 S_WR_B: begin
                     xfer_active <= 1'b1;
-                    if (dma_bvalid && dma_bready) begin
-                        word_cnt <= word_cnt + 16'd1;
-                    end
                 end
 
                 default: begin
@@ -344,7 +347,7 @@ module axi_dma_wrapper #(
                 if (start && mode == 2'b01)
                     next = S_RD_START;
                 else if (start && mode == 2'b10)
-                    next = S_WR_ACCEPT;
+                    next = S_WR_AW;
             end
 
             S_RD_START: begin
@@ -362,26 +365,22 @@ module axi_dma_wrapper #(
                     next = S_IDLE;
             end
 
-            S_WR_ACCEPT: begin
-                next = S_WR_AW;
-            end
-
             S_WR_AW: begin
                 if (dma_awready)
                     next = S_WR_W;
             end
 
             S_WR_W: begin
-                if (dma_wready)
+                if (dma_wvalid && dma_wready && dma_wlast)
                     next = S_WR_B;
             end
 
             S_WR_B: begin
                 if (dma_bvalid && dma_bready) begin
-                    if (word_cnt + 16'd1 >= total_words)
+                    if (word_cnt >= total_words)
                         next = S_RD_DONE;
                     else
-                        next = S_WR_ACCEPT;
+                        next = S_WR_AW;
                 end
             end
 
@@ -393,15 +392,16 @@ module axi_dma_wrapper #(
     // AXI write channel drives (combinational from state)
     // ------------------------------------------------------------
     assign dma_awaddr  = ext_addr + {word_cnt, 3'd0};
-    assign dma_awlen   = 8'd0;          // single beat
+    assign dma_awlen   = wr_next_burst_words[7:0] - 8'd1;
     assign dma_awvalid = (state == S_WR_AW);
 
-    assign dma_wdata  = wr_buf;
+    assign dma_wdata  = wr_data;
     assign dma_wstrb  = 8'hFF;
-    assign dma_wlast  = 1'b1;
+    assign dma_wlast  = (wr_burst_beat + 9'd1 >= wr_burst_words);
     assign dma_wvalid = (state == S_WR_W);
 
     assign dma_bready = (state == S_WR_B);
+    assign wr_ready   = (state == S_WR_W) && dma_wready;
 
     // ================================================================
     // Internal AXI RAM — 64 KB byte-addressable
