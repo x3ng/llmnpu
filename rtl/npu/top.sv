@@ -606,10 +606,13 @@ module npu_top #(
     wire dma_target_osram = (csr_dma_sram_addr[15:12] == 4'h2);
     localparam logic [15:0] PP_GEMM_A_BANK_OFFSET = `PP_GEMM_A_SIZE;
     localparam logic [15:0] PP_GEMM_B_BANK_OFFSET = `PP_GEMM_B_SIZE;
+    localparam logic [15:0] PP_GEMM_P_BANK_OFFSET = `PP_GEMM_P_SIZE;
     wire [15:0] dma_gemm_a_fill_offset = pp_gemm_a_fill_bank ? PP_GEMM_A_BANK_OFFSET : 16'd0;
     wire [15:0] dma_gemm_b_fill_offset = pp_gemm_b_fill_bank ? PP_GEMM_B_BANK_OFFSET : 16'd0;
+    wire [15:0] dma_gemm_p_active_offset = pp_gemm_p_active_bank ? PP_GEMM_P_BANK_OFFSET : 16'd0;
     wire [15:0] gpl_gemm_a_active_offset = pp_gemm_a_active_bank ? PP_GEMM_A_BANK_OFFSET : 16'd0;
     wire [15:0] gpl_gemm_b_active_offset = pp_gemm_b_active_bank ? PP_GEMM_B_BANK_OFFSET : 16'd0;
+    wire [15:0] gemm_p_fill_offset = pp_gemm_p_fill_bank ? PP_GEMM_P_BANK_OFFSET : 16'd0;
 
     crossbar u_crossbar (
         .clk,
@@ -669,6 +672,9 @@ module npu_top #(
                 dma_br_xbar_addr_calc = dma_br_sram_addr_calc + {16'd0, dma_gemm_a_fill_offset};
             else if (dma_target_wsram)
                 dma_br_xbar_addr_calc = dma_br_sram_addr_calc + {16'd0, dma_gemm_b_fill_offset};
+        end else if (dma_br_state == DMA_BR_PREFILL) begin
+            if (dma_target_osram)
+                dma_br_xbar_addr_calc = dma_br_sram_addr_calc + {16'd0, dma_gemm_p_active_offset};
         end
         dma_br_word_active = (dma_br_row < dma_br_rows) &&
                              (dma_br_cnt < dma_br_row_bytes);
@@ -1159,7 +1165,9 @@ module npu_top #(
         end
     endgenerate
 
-    assign gemm_wb_addr  = gpl_o_base + {gemm_wb_cnt, 2'b00};
+    wire gemm_wb_done = gemm_wb_active && xbar_m2_grant && (gemm_wb_cnt == 7'd127);
+
+    assign gemm_wb_addr  = gpl_o_base + gemm_p_fill_offset + {gemm_wb_cnt, 2'b00};
     assign gemm_wb_wdata = wb_word_arr[gemm_wb_cnt];
 
     // M2 is exclusively used by GEMM writeback. VALU/SFU have no
@@ -1235,7 +1243,7 @@ module npu_top #(
     assign pp_gemm_a_consume = gemm_done;
     assign pp_gemm_b_fill    = dma_bridge_copy_done && dma_target_wsram;
     assign pp_gemm_b_consume = gemm_done;
-    assign pp_gemm_p_fill    = gemm_psum_valid;
+    assign pp_gemm_p_fill    = gemm_wb_done;
     assign pp_gemm_p_consume = prefill_done && dma_target_osram;
     assign pp_valu_fill      = 1'b0;
     assign pp_valu_consume   = valu_done;
