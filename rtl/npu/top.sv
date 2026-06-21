@@ -98,10 +98,10 @@ module npu_top #(
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n)
             running <= 1'b0;
-        else if (csr_rst)
-            running <= 1'b0;
         else if (csr_start)
             running <= 1'b1;
+        else if (csr_rst)
+            running <= 1'b0;
     end
 
     wire dp_rst_n = rst_n && !csr_rst;
@@ -169,7 +169,7 @@ module npu_top #(
         .mem_we         (dbg_imem_we),
         .mem_addr       (dbg_imem_addr),
         .mem_wdata      (dbg_imem_wdata),
-        .halt           (csr_halt),
+        .halt           (csr_halt || !running),
         .gemm_busy      (ifid_gemm_busy),
         .valu_busy      (valu_busy),
         .sfu_busy       (sfu_busy),

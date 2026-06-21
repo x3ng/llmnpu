@@ -358,7 +358,7 @@ async def test_ifid_gemm_uses_descriptor_ref(dut):
     await Timer(1, unit="ps")
 
     await csr_write(dut, CSR_DESC_PTR, DSRAM_BASE)
-    await csr_write(dut, CSR_CTRL, 0x00000000)
+    await csr_write(dut, CSR_CTRL, CSR_CTRL_START)
 
     entered_preload = False
     for _ in range(60):
@@ -406,7 +406,7 @@ async def test_ifid_sync_waits_for_gemm_path(dut):
     await Timer(1, unit="ps")
 
     await csr_write(dut, CSR_DESC_PTR, DSRAM_BASE)
-    await csr_write(dut, CSR_CTRL, 0x00000000)
+    await csr_write(dut, CSR_CTRL, CSR_CTRL_START)
 
     gemm_path_seen = False
     stall_seen = False
@@ -673,7 +673,7 @@ async def test_ifid_dma_store_prefills_dma_sram(dut):
     await if_load(dut, 1, (OP_WFI << 24))
     await Timer(1, unit="ps")
 
-    await csr_write(dut, CSR_CTRL, 0x00000000)
+    await csr_write(dut, CSR_CTRL, CSR_CTRL_START)
 
     prefill_writes = 0
     for _ in range(120):
@@ -694,6 +694,43 @@ async def test_ifid_dma_store_prefills_dma_sram(dut):
         f"IF/ID DMA_ST prefill expected 0x{expected:016X}, got 0x{got:016X}"
     )
     dut._log.info("PASS: IF/ID DMA_ST prefill copies O-SRAM into DMA SRAM")
+
+
+@cocotb.test()
+async def test_csr_start_releases_ifid_pc(dut):
+    """IF/ID PC stays stopped after reset until CSR CTRL.START is written."""
+    await setup_dut(dut)
+
+    dut.rst_n.value = 1
+    await RisingEdge(dut.clk)
+    await Timer(1, unit="ps")
+
+    vadd_instr = (OP_VADD << 24) | (1 << 16) | (2 << 8) | 3
+    await csr_write(dut, CSR_CTRL, CSR_CTRL_RESET)
+    await if_load(dut, 0, vadd_instr)
+    await if_load(dut, 1, (OP_WFI << 24))
+
+    await csr_write(dut, CSR_CTRL, 0)
+    for cycle in range(8):
+        await RisingEdge(dut.clk)
+        await Timer(1, unit="ps")
+        assert not int(dut.valu_cmd_valid.value), (
+            f"IF/ID dispatched before CTRL.START at cycle {cycle}"
+        )
+        assert int(dut.if_stall.value), "IF/ID should remain stalled before START"
+
+    await csr_write(dut, CSR_CTRL, CSR_CTRL_START)
+    dispatched = False
+    for _ in range(8):
+        await RisingEdge(dut.clk)
+        await Timer(1, unit="ps")
+        if int(dut.valu_cmd_valid.value):
+            dispatched = True
+            assert int(dut.valu_cmd.value) == vadd_instr
+            break
+
+    assert dispatched, "IF/ID did not dispatch after CTRL.START"
+    dut._log.info("PASS: CSR CTRL.START releases IF/ID PC")
 
 
 @cocotb.test()
@@ -718,7 +755,7 @@ async def test_csr_halt_stalls_ifid_only(dut):
         )
         assert int(dut.if_stall.value), "IF/ID stall should assert while HALT is set"
 
-    await csr_write(dut, CSR_CTRL, 0)
+    await csr_write(dut, CSR_CTRL, CSR_CTRL_START)
     dispatched = False
     for _ in range(8):
         await RisingEdge(dut.clk)

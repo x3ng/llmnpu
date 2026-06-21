@@ -283,7 +283,7 @@ int npu_run_program(npu_dev_t *d, const void *image, size_t n,
 
     csr_wr(d, CSR_IRQ_STAT, IRQ_DONE);
     csr_wr(d, CSR_DESC_PTR, desc_base);
-    csr_wr(d, CSR_CTRL, 0u);
+    csr_wr(d, CSR_CTRL, CSR_CTRL_START);
 
     return npu_wait_done(d, timeout_us);
 }
