@@ -312,6 +312,19 @@ def dma_ext_read_word(dut, byte_addr):
     return result
 
 
+def check_dma_ext_i16_tile_constant(dut, byte_addr, expected):
+    mismatches = []
+    for r in range(16):
+        for c in range(16):
+            word_addr = byte_addr + r * 32 + (c // 2) * 4
+            word = dma_ext_read_word(dut, word_addr)
+            raw = (word >> (16 * (c & 1))) & 0xFFFF
+            got = raw if raw < 0x8000 else raw - 0x10000
+            if got != expected:
+                mismatches.append((r, c, got))
+    return mismatches
+
+
 def write_gemm_constant_tile(dut, a_base, b_base, a_value, b_value):
     a_word = _pack_word_i8([a_value] * 4)
     b_word = _pack_word_i8([b_value] * 4)
@@ -1231,6 +1244,93 @@ async def test_tile_flow_gemm_sfu_relu_dma_store_result(dut):
         f"postprocess tile output mismatches: {mismatches[:8]} total={len(mismatches)}"
     )
     dut._log.info("PASS: tile flow GEMM -> SFU ReLU -> DMA STORE result")
+
+
+@cocotb.test()
+async def test_full_pingpong_two_tile_dma_gemm_store_flow(dut):
+    """Two-tile NPU flow keeps A/B/P ping-pong banks distinct end-to-end."""
+    await setup_dut(dut)
+
+    dut.rst_n.value = 1
+    await RisingEdge(dut.clk)
+    await Timer(1, unit="ps")
+
+    await csr_write(dut, CSR_CTRL, CSR_CTRL_RESET)
+    for i in range(4):
+        await if_load(dut, i, (OP_WFI << 24))
+    await csr_write(dut, CSR_CTRL, 0)
+    await ClockCycles(dut.clk, 2)
+
+    a0_ext = 0x00004600
+    b0_ext = 0x00005600
+    c0_ext = 0x00006600
+    a1_ext = 0x00004800
+    b1_ext = 0x00005800
+    c1_ext = 0x00006800
+
+    dma_ext_write_i8_tile(dut, a0_ext, [[1 for _ in range(16)] for _ in range(16)])
+    dma_ext_write_i8_tile(dut, b0_ext, [[1 for _ in range(16)] for _ in range(16)])
+    dma_ext_write_i8_tile(dut, a1_ext, [[2 for _ in range(16)] for _ in range(16)])
+    dma_ext_write_i8_tile(dut, b1_ext, [[1 for _ in range(16)] for _ in range(16)])
+    await Timer(1, unit="ps")
+
+    a0_addrs = await start_dma_load_and_collect_copy_addrs(
+        dut, a0_ext, ASRAM_BASE, 256, timeout_cycles=2000)
+    a1_addrs = await start_dma_load_and_collect_copy_addrs(
+        dut, a1_ext, ASRAM_BASE, 256, timeout_cycles=2000)
+    b0_addrs = await start_dma_load_and_collect_copy_addrs(
+        dut, b0_ext, WSRAM_BASE, 256, timeout_cycles=2000)
+    b1_addrs = await start_dma_load_and_collect_copy_addrs(
+        dut, b1_ext, WSRAM_BASE, 256, timeout_cycles=2000)
+
+    assert a0_addrs[0] == ASRAM_BASE and a0_addrs[-1] == ASRAM_BASE + 252
+    assert a1_addrs[0] == ASRAM_BASE + PP_GEMM_A_SIZE
+    assert a1_addrs[-1] == ASRAM_BASE + PP_GEMM_A_SIZE + 252
+    assert b0_addrs[0] == WSRAM_BASE and b0_addrs[-1] == WSRAM_BASE + 252
+    assert b1_addrs[0] == WSRAM_BASE + PP_GEMM_B_SIZE
+    assert b1_addrs[-1] == WSRAM_BASE + PP_GEMM_B_SIZE + 252
+
+    dsram_write_word(dut, DSRAM_BASE + 0, 0x00010001)
+    dsram_write_word(dut, DSRAM_BASE + 4, 0x01000001)
+    dsram_write_word(dut, DSRAM_BASE + 8, 0x00000002)
+    dsram_write_word(dut, DSRAM_BASE + 12, 0x01000000)
+    dsram_write_word(dut, DSRAM_BASE + 16, 0x00000000)
+    await Timer(1, unit="ps")
+
+    await csr_write(dut, CSR_DESC_PTR, DSRAM_BASE)
+    await csr_write(dut, CSR_CTRL, ctrl_start(OP_GEMM))
+    await wait_gemm_idle_after_busy(dut, timeout_cycles=2200)
+
+    assert int(dut.pp_gemm_a_active_bank.value) == 1
+    assert int(dut.pp_gemm_b_active_bank.value) == 1
+    assert int(dut.pp_gemm_p_active_bank.value) == 0
+    assert osram_read_word(dut, OSRAM_BASE) == 0x00100010
+
+    await csr_write(dut, CSR_CTRL, ctrl_start(OP_GEMM))
+    await wait_gemm_idle_after_busy(dut, timeout_cycles=2200)
+
+    assert osram_read_word(dut, OSRAM_BASE + PP_GEMM_P_SIZE) == 0x00200020
+    assert int(dut.pp_gemm_p_active_bank.value) == 0
+
+    store0_addrs = await start_dma_store_and_collect_prefill_addrs(
+        dut, c0_ext, OSRAM_BASE, 512, timeout_cycles=2200)
+    assert store0_addrs[0] == OSRAM_BASE and store0_addrs[-1] == OSRAM_BASE + 508
+    assert int(dut.pp_gemm_p_active_bank.value) == 1
+
+    store1_addrs = await start_dma_store_and_collect_prefill_addrs(
+        dut, c1_ext, OSRAM_BASE, 512, timeout_cycles=2200)
+    assert store1_addrs[0] == OSRAM_BASE + PP_GEMM_P_SIZE
+    assert store1_addrs[-1] == OSRAM_BASE + PP_GEMM_P_SIZE + 508
+
+    c0_mismatches = check_dma_ext_i16_tile_constant(dut, c0_ext, 16)
+    c1_mismatches = check_dma_ext_i16_tile_constant(dut, c1_ext, 32)
+    assert not c0_mismatches, (
+        f"tile0 output mismatches: {c0_mismatches[:8]} total={len(c0_mismatches)}"
+    )
+    assert not c1_mismatches, (
+        f"tile1 output mismatches: {c1_mismatches[:8]} total={len(c1_mismatches)}"
+    )
+    dut._log.info("PASS: full ping-pong two-tile DMA/GEMM/STORE flow")
 
 
 @cocotb.test()
