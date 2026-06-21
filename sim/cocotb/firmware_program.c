@@ -1,10 +1,12 @@
-// E2E program-stream test:
+// E2E program/runtime test:
 //   CPU loads A/B tiles, runs a serialized .npu GEMM program through
-//   npu_run_program(), stores O-SRAM back to memory, and checks results.
+//   npu_run_program(), issues an SFU ReLU postprocess through the driver,
+//   stores O-SRAM back to memory, and checks results.
 
 #include <stdint.h>
 #include "../../sw/driver/npu_driver.h"
 #include "../../sw/driver/npu_csr.h"
+#include "../../sw/driver/npu_abi.h"
 
 #define TILE 16
 
@@ -49,7 +51,7 @@ void main(void)
     npu_dev_t npu;
 
     for (int i = 0; i < TILE * TILE; i++) {
-        A[i] = 1;
+        A[i] = -1;
         B[i] = 1;
         C[i] = 0;
     }
@@ -57,21 +59,17 @@ void main(void)
     npu_init(&npu, NPU_CSR_BASE);
     uart_putc('i');
 
-    for (int r = 0; r < TILE; r++) {
-        if (npu_dma_ld(&npu, (uint32_t)(uintptr_t)&A[r * TILE],
-                       ASRAM_BASE + (uint32_t)(r * TILE), TILE) != 0) {
-            uart_putc('A');
-            while (1) __asm__ volatile ("wfi");
-        }
+    if (npu_dma_ld(&npu, (uint32_t)(uintptr_t)A,
+                   ASRAM_BASE, TILE * TILE) != 0) {
+        uart_putc('A');
+        while (1) __asm__ volatile ("wfi");
     }
     uart_putc('a');
 
-    for (int r = 0; r < TILE; r++) {
-        if (npu_dma_ld(&npu, (uint32_t)(uintptr_t)&B[r * TILE],
-                       WSRAM_BASE + (uint32_t)(r * TILE), TILE) != 0) {
-            uart_putc('B');
-            while (1) __asm__ volatile ("wfi");
-        }
+    if (npu_dma_ld(&npu, (uint32_t)(uintptr_t)B,
+                   WSRAM_BASE, TILE * TILE) != 0) {
+        uart_putc('B');
+        while (1) __asm__ volatile ("wfi");
     }
     uart_putc('b');
 
@@ -83,18 +81,22 @@ void main(void)
     }
     uart_putc('g');
 
-    for (int r = 0; r < TILE; r++) {
-        if (npu_dma_st(&npu, (uint32_t)(uintptr_t)&C[r * TILE],
-                       OSRAM_BASE + (uint32_t)(r * TILE * 2),
-                       TILE * 2) != 0) {
-            uart_putc('S');
-            while (1) __asm__ volatile ("wfi");
-        }
+    if (npu_issue(&npu, NPU_OP_ACT_RELU, 0u) != 0 ||
+        npu_wait_done(&npu, 1000000u) != 0) {
+        uart_putc('R');
+        while (1) __asm__ volatile ("wfi");
+    }
+    uart_putc('p');
+
+    if (npu_dma_st(&npu, (uint32_t)(uintptr_t)C,
+                   OSRAM_BASE, TILE * TILE * sizeof(C[0])) != 0) {
+        uart_putc('S');
+        while (1) __asm__ volatile ("wfi");
     }
     uart_putc('s');
 
     for (int i = 0; i < TILE * TILE; i++) {
-        if (C[i] != TILE) {
+        if (C[i] != 0) {
             uart_putc('M');
             while (1) __asm__ volatile ("wfi");
         }

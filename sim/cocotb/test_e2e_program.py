@@ -17,26 +17,36 @@ async def test_e2e_program(dut):
     await Timer(1, unit="ps")
 
     last = int(dut.uart_tx.value)
-    progress = set("iabrg s".replace(" ", ""))
-    for cyc in range(160_000):
+    expected_progress = "iabrgpsP"
+    progress = []
+    valid_markers = set(expected_progress[:-1])
+    for cyc in range(240_000):
         await RisingEdge(dut.clk)
         await Timer(1, unit="ps")
         val = int(dut.uart_tx.value)
         if val != 0 and val != last:
             ch = chr(val)
+            progress.append(ch)
             dut._log.info(
                 f"UART_TX = 0x{val:02X} ('{ch}') at cycle {cyc + 1}"
             )
             if ch == "P":
+                assert "".join(progress) == expected_progress, (
+                    f"unexpected program progress {''.join(progress)}"
+                )
                 dut._log.info("E2E program-stream test: PASS")
                 return
-            if ch not in progress:
-                assert False, f"program-stream firmware failed at stage '{ch}'"
+            if ch not in valid_markers:
+                assert False, (
+                    f"program-stream firmware failed at stage '{ch}', "
+                    f"progress={''.join(progress)}"
+                )
         last = val
 
     try:
         dut._log.info(
             "timeout diag: "
+            f"progress={''.join(progress)} "
             f"uart=0x{int(dut.uart_tx.value):02X} "
             f"csr_status=0x{int(dut.u_npu.u_csr.status_reg.value):08X} "
             f"csr_ctrl=0x{int(dut.u_npu.u_csr.ctrl_reg.value):08X} "
