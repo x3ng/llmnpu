@@ -34,7 +34,20 @@ CSR_PC        = 0x02
 CSR_DESC_PTR  = 0x04
 CSR_IRQ_EN    = 0x10
 CSR_IRQ_STAT  = 0x11
+CSR_DEBUG     = 0x18
 CSR_PERF_CYC  = 0x20
+
+OP_GEMM       = 0x01
+OP_ACT_RELU   = 0x20
+
+DEBUG_GPL_STATE_SHIFT = 5
+DEBUG_GPL_STATE_MASK = 0x7 << DEBUG_GPL_STATE_SHIFT
+
+DSRAM_BASE = 0x3000
+
+
+def ctrl_start(opcode):
+    return 0x00000001 | ((opcode & 0xFF) << 8)
 
 
 async def csr_write(dut, addr_word, value):
@@ -84,6 +97,12 @@ async def valu_read_reg(dut, reg_idx):
     val = int(dut.dbg_valu_rdata_flat.value)
     dut.dbg_valu_raddr.value = 0
     return unpack_bytes(val)
+
+
+def dsram_write_word(dut, byte_addr, value):
+    """Write a 32-bit word directly into DSRAM for focused top-level tests."""
+    word_idx = (byte_addr - DSRAM_BASE) >> 2
+    dut.u_crossbar.u_dsram.mem[word_idx].value = value & 0xFFFFFFFF
 
 
 async def setup_dut(dut):
@@ -137,6 +156,110 @@ async def test_csr_rw(dut):
 
 
 @cocotb.test()
+async def test_csr_start_opcode_gates_gemm(dut):
+    """CSR START only enters GEMM preloader when CTRL[15:8] is OP_GEMM."""
+    await setup_dut(dut)
+
+    dut.rst_n.value = 1
+    await RisingEdge(dut.clk)
+    await Timer(1, unit="ps")
+
+    # Hold datapath reset while loading NOPs so IF/ID cannot dispatch X data.
+    await csr_write(dut, CSR_CTRL, 0x00000002)
+    for i in range(4):
+        await if_load(dut, i, 0xFF000000)
+    await csr_write(dut, CSR_CTRL, 0x00000000)
+    await ClockCycles(dut.clk, 2)
+
+    # Non-GEMM opcode must not be interpreted as implicit GEMM.
+    await csr_write(dut, CSR_CTRL, ctrl_start(OP_ACT_RELU))
+    await ClockCycles(dut.clk, 8)
+    status = await csr_read(dut, CSR_STATUS)
+    debug = await csr_read(dut, CSR_DEBUG)
+    gpl_state = (debug & DEBUG_GPL_STATE_MASK) >> DEBUG_GPL_STATE_SHIFT
+    assert (status & 1) == 0, f"non-GEMM CSR start made NPU busy: status=0x{status:08X}"
+    assert gpl_state == 0, f"non-GEMM CSR start entered GPL state {gpl_state}"
+
+    # Re-assert datapath reset, then start with OP_GEMM.  This should still
+    # reach the GEMM preload path even though data contents are just zeros.
+    await csr_write(dut, CSR_CTRL, 0x00000002)
+    await ClockCycles(dut.clk, 2)
+    await csr_write(dut, CSR_CTRL, 0x00000000)
+    await ClockCycles(dut.clk, 2)
+    await csr_write(dut, CSR_CTRL, ctrl_start(OP_GEMM))
+
+    busy_seen = False
+    for _ in range(50):
+        await RisingEdge(dut.clk)
+        await Timer(1, unit="ps")
+        status = await csr_read(dut, CSR_STATUS)
+        debug = await csr_read(dut, CSR_DEBUG)
+        gpl_state = (debug & DEBUG_GPL_STATE_MASK) >> DEBUG_GPL_STATE_SHIFT
+        if (status & 1) or gpl_state != 0:
+            busy_seen = True
+            break
+
+    assert busy_seen, "OP_GEMM CSR start did not enter GEMM path"
+    dut._log.info("PASS: CSR START opcode gates GEMM issue path")
+
+
+@cocotb.test()
+async def test_csr_gemm_fetches_descriptor(dut):
+    """CSR GEMM issue reads GemmDesc from DSRAM at CSR_DESC_PTR."""
+    await setup_dut(dut)
+
+    dut.rst_n.value = 1
+    await RisingEdge(dut.clk)
+    await Timer(1, unit="ps")
+
+    await csr_write(dut, CSR_CTRL, 0x00000002)
+    for i in range(4):
+        await if_load(dut, i, 0xFF000000)
+
+    # GemmDesc little-endian words:
+    # word0: M=1, N=1
+    # word1: K=2 tiles, A bank=0, W bank=1
+    # word2: O bank=2, zero-points default 0
+    dsram_write_word(dut, DSRAM_BASE + 0, 0x00010001)
+    dsram_write_word(dut, DSRAM_BASE + 4, 0x01000002)
+    dsram_write_word(dut, DSRAM_BASE + 8, 0x00000002)
+    dsram_write_word(dut, DSRAM_BASE + 12, 0x00000000)
+    dsram_write_word(dut, DSRAM_BASE + 16, 0x00000000)
+    await Timer(1, unit="ps")
+
+    await csr_write(dut, CSR_DESC_PTR, DSRAM_BASE)
+    await csr_write(dut, CSR_CTRL, 0x00000000)
+    await ClockCycles(dut.clk, 2)
+    await csr_write(dut, CSR_CTRL, ctrl_start(OP_GEMM))
+
+    entered_preload = False
+    for _ in range(40):
+        await RisingEdge(dut.clk)
+        await Timer(1, unit="ps")
+        state = int(dut.gpl_state.value)
+        if state in (1, 2, 3, 4, 5):
+            entered_preload = True
+            break
+
+    assert entered_preload, "CSR GEMM did not leave descriptor fetch for preload"
+    assert int(dut.gpl_k_count.value) == 32, (
+        "descriptor K=2 tiles produced "
+        f"k_count={int(dut.gpl_k_count.value)} "
+        f"dsram[1]=0x{int(dut.u_crossbar.u_dsram.mem[1].value):08X} "
+        f"csr_desc=0x{int(dut.csr_desc_ptr.value):04X} "
+        f"latched=0x{int(dut.gpl_desc_ptr_latched.value):04X} "
+        f"bases=0x{int(dut.gpl_a_base.value):04X}/"
+        f"0x{int(dut.gpl_b_base.value):04X}/"
+        f"0x{int(dut.gpl_o_base.value):04X}"
+    )
+    assert int(dut.gpl_a_base.value) == 0x0000
+    assert int(dut.gpl_b_base.value) == 0x1000
+    assert int(dut.gpl_o_base.value) == 0x2000
+
+    dut._log.info("PASS: CSR GEMM consumes DSRAM descriptor")
+
+
+@cocotb.test()
 async def test_valu_integration(dut):
     """Test 2: VALU VADD via IF/ID dispatch pipeline.
 
@@ -186,7 +309,7 @@ async def test_valu_integration(dut):
     dut._log.info("VALU regfile preload verified")
 
     # ---- Step 4: Release CSR reset + start ----
-    await csr_write(dut, CSR_CTRL, 0x00000001)  # bit0=start, bit1=0
+    await csr_write(dut, CSR_CTRL, 0x00000001)  # release reset; IF/ID drives VALU
     await RisingEdge(dut.clk)
     await Timer(1, unit="ps")
 

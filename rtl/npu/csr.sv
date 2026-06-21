@@ -24,6 +24,7 @@ module csr (
     // Control outputs to NPU
     output logic        npu_start,
     output logic        npu_rst,
+    output logic [7:0]  issue_opcode,
 
     // DMA CSR register outputs (for top-level DMA wiring)
     output logic [31:0] dma_ext_addr,
@@ -151,17 +152,12 @@ module csr (
     // ----------------------------------------------------------------
     // Control outputs
     // ----------------------------------------------------------------
-    // npu_start: single-cycle pulse on CTRL[0] rising edge
-    logic prev_start_bit;
-    always_ff @(posedge clk or negedge rst_n) begin
-        if (!rst_n)
-            prev_start_bit <= 1'b0;
-        else
-            prev_start_bit <= ctrl_reg[0];
-    end
-    assign npu_start = ctrl_reg[0] && !prev_start_bit;
+    // npu_start: single-cycle pulse whenever software writes CTRL[0].
+    // CTRL is a stored debug/control register, but START behaves like a strobe.
+    assign npu_start = we && (waddr == A_CTRL) && wdata[0];
 
     assign npu_rst = ctrl_reg[1];
+    assign issue_opcode = (we && (waddr == A_CTRL)) ? wdata[15:8] : ctrl_reg[15:8];
 
     // ----------------------------------------------------------------
     // Status register

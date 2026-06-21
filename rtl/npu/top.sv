@@ -83,6 +83,7 @@ module npu_top #(
     logic        csr_dma_start;
     logic        csr_dma_is_store;
     logic [31:0] csr_desc_ptr;
+    logic [7:0]  csr_issue_opcode;
 
     // ================================================================
     // Running flag
@@ -124,6 +125,7 @@ module npu_top #(
         .debug_signals   (debug_signals),
         .npu_start       (csr_start),
         .npu_rst         (csr_rst),
+        .issue_opcode    (csr_issue_opcode),
         .dma_ext_addr    (csr_dma_ext_addr),
         .dma_sram_addr   (csr_dma_sram_addr),
         .dma_length      (csr_dma_length),
@@ -184,11 +186,12 @@ module npu_top #(
 
     logic        gpl_gemm_start;
     logic        gpl_feeding;
+    logic        csr_gemm_start;
 
-    assign gemm_issue_valid = gemm_cmd_valid || csr_start;
-    assign gemm_issue_cmd   = csr_start ? {`OP_GEMM, 16'd0, 8'd16} : gemm_cmd;
+    assign csr_gemm_start   = csr_start && (csr_issue_opcode == `OP_GEMM);
+    assign gemm_issue_valid = gemm_cmd_valid || csr_gemm_start;
+    assign gemm_issue_cmd   = csr_gemm_start ? {`OP_GEMM, 16'd0, 8'd16} : gemm_cmd;
     assign gemm_start       = gpl_gemm_start;
-    assign gemm_k_count     = gemm_issue_cmd_latched[7:0];
 
     always_ff @(posedge clk or negedge dp_rst_n) begin
         if (!dp_rst_n)
@@ -532,15 +535,20 @@ module npu_top #(
     // ================================================================
     // GEMM Data Preloader
     // ================================================================
-    typedef enum logic [2:0] {
-        GPL_IDLE      = 3'd0,
-        GPL_LOAD_B0   = 3'd1,
-        GPL_LOAD_B1   = 3'd2,
-        GPL_LOAD_B2   = 3'd3,
-        GPL_LOAD_B3   = 3'd4,
-        GPL_LOAD_A    = 3'd5,
-        GPL_START     = 3'd6,
-        GPL_WAIT      = 3'd7
+    typedef enum logic [3:0] {
+        GPL_IDLE      = 4'd0,
+        GPL_LOAD_B0   = 4'd1,
+        GPL_LOAD_B1   = 4'd2,
+        GPL_LOAD_B2   = 4'd3,
+        GPL_LOAD_B3   = 4'd4,
+        GPL_LOAD_A    = 4'd5,
+        GPL_START     = 4'd6,
+        GPL_WAIT      = 4'd7,
+        GPL_DESC0     = 4'd8,
+        GPL_DESC1     = 4'd9,
+        GPL_DESC2     = 4'd10,
+        GPL_DESC3     = 4'd11,
+        GPL_DESC4     = 4'd12
     } gpl_state_t;
 
     gpl_state_t  gpl_state, gpl_next;
@@ -558,6 +566,16 @@ module npu_top #(
     logic        gpl_capture_is_b;
     logic [3:0]  gpl_capture_row;
     logic [1:0]  gpl_capture_word;
+    logic        gpl_desc_capture_valid;
+    logic [2:0]  gpl_desc_capture_word;
+    logic [15:0] gpl_desc_ptr_latched;
+    logic [15:0] gpl_a_base;
+    logic [15:0] gpl_b_base;
+    logic [15:0] gpl_o_base;
+    logic [7:0]  gpl_k_count;
+    logic        gpl_desc_valid;
+
+    assign gemm_k_count = gpl_k_count;
 
     logic [15:0] gpl_read_addr;
     always_comb begin
@@ -574,13 +592,18 @@ module npu_top #(
         gpl_read_addr = 16'd0;
         case (gpl_state)
             GPL_LOAD_B0, GPL_LOAD_B1, GPL_LOAD_B2, GPL_LOAD_B3:
-                gpl_read_addr = `WSRAM_BASE
+                gpl_read_addr = gpl_b_base
                               + {gpl_row, 4'd0}
                               + {10'd0, gpl_b_word, 2'd0};
             GPL_LOAD_A:
-                gpl_read_addr = `ASRAM_BASE
+                gpl_read_addr = gpl_a_base
                               + {gpl_row, 4'd0}
                               + {10'd0, gpl_word, 2'd0};
+            GPL_DESC0: gpl_read_addr = gpl_desc_ptr_latched;
+            GPL_DESC1: gpl_read_addr = gpl_desc_ptr_latched + 16'd4;
+            GPL_DESC2: gpl_read_addr = gpl_desc_ptr_latched + 16'd8;
+            GPL_DESC3: gpl_read_addr = gpl_desc_ptr_latched + 16'd12;
+            GPL_DESC4: gpl_read_addr = gpl_desc_ptr_latched + 16'd16;
             default: gpl_read_addr = 16'd0;
         endcase
     end
@@ -605,6 +628,14 @@ module npu_top #(
             gpl_capture_is_b  <= 1'b0;
             gpl_capture_row   <= 4'd0;
             gpl_capture_word  <= 2'd0;
+            gpl_desc_capture_valid <= 1'b0;
+            gpl_desc_capture_word  <= 3'd0;
+            gpl_desc_ptr_latched   <= `DSRAM_BASE;
+            gpl_a_base             <= `ASRAM_BASE;
+            gpl_b_base             <= `WSRAM_BASE;
+            gpl_o_base             <= `OSRAM_BASE;
+            gpl_k_count            <= 8'd16;
+            gpl_desc_valid         <= 1'b0;
             for (int r = 0; r < 16; r++) begin
                 gpl_b_row[r] <= 128'd0;
                 gpl_a_row[r] <= 128'd0;
@@ -624,6 +655,27 @@ module npu_top #(
             end
             gpl_capture_valid <= 1'b0;
 
+            if (gpl_desc_capture_valid) begin
+                unique case (gpl_desc_capture_word)
+                    3'd1: begin
+                        if (xbar_m1_rdata[15:0] != 16'd0) begin
+                            gpl_k_count <= (xbar_m1_rdata[15:4] != 12'd0) ? 8'hFF :
+                                           {xbar_m1_rdata[3:0], 4'd0};
+                            gpl_a_base   <= {xbar_m1_rdata[19:16], 12'd0};
+                            gpl_b_base   <= {xbar_m1_rdata[27:24], 12'd0};
+                            gpl_desc_valid <= 1'b1;
+                        end
+                    end
+                    3'd2: begin
+                        if (gpl_desc_valid)
+                            gpl_o_base <= {xbar_m1_rdata[3:0], 12'd0};
+                    end
+                    default: begin
+                    end
+                endcase
+            end
+            gpl_desc_capture_valid <= 1'b0;
+
             case (gpl_state)
                 GPL_IDLE: begin
                     gpl_row   <= 4'd0;
@@ -631,6 +683,27 @@ module npu_top #(
                     gpl_feeding <= 1'b0;
                     gpl_feed_k <= 4'd0;
                     gpl_feed_phase <= 2'd0;
+                    if (gemm_issue_valid) begin
+                        gpl_desc_ptr_latched <= csr_desc_ptr[15:0];
+                        gpl_a_base           <= `ASRAM_BASE;
+                        gpl_b_base           <= `WSRAM_BASE;
+                        gpl_o_base           <= `OSRAM_BASE;
+                        gpl_k_count          <= (gemm_issue_cmd[7:0] == 8'd0) ? 8'd16 :
+                                                gemm_issue_cmd[7:0];
+                        gpl_desc_valid       <= 1'b0;
+                    end
+                end
+                GPL_DESC0, GPL_DESC1, GPL_DESC2, GPL_DESC3, GPL_DESC4: begin
+                    if (xbar_m1_grant) begin
+                        gpl_desc_capture_valid <= 1'b1;
+                        unique case (gpl_state)
+                            GPL_DESC0: gpl_desc_capture_word <= 3'd0;
+                            GPL_DESC1: gpl_desc_capture_word <= 3'd1;
+                            GPL_DESC2: gpl_desc_capture_word <= 3'd2;
+                            GPL_DESC3: gpl_desc_capture_word <= 3'd3;
+                            default:   gpl_desc_capture_word <= 3'd4;
+                        endcase
+                    end
                 end
                 GPL_LOAD_B0, GPL_LOAD_B1, GPL_LOAD_B2, GPL_LOAD_B3: begin
                     if (xbar_m1_grant) begin
@@ -684,7 +757,12 @@ module npu_top #(
     always_comb begin
         gpl_next = gpl_state;
         case (gpl_state)
-            GPL_IDLE:    if (gemm_issue_valid)             gpl_next = GPL_LOAD_B0;
+            GPL_IDLE:    if (gemm_issue_valid) begin
+                              if (csr_gemm_start)
+                                  gpl_next = GPL_DESC0;
+                              else
+                                  gpl_next = GPL_LOAD_B0;
+                          end
             GPL_LOAD_B0: if (xbar_m1_grant)                gpl_next = GPL_LOAD_B1;
             GPL_LOAD_B1: if (xbar_m1_grant)                gpl_next = GPL_LOAD_B2;
             GPL_LOAD_B2: if (xbar_m1_grant)                gpl_next = GPL_LOAD_B3;
@@ -698,11 +776,19 @@ module npu_top #(
                                                             gpl_next = GPL_START;
             GPL_START:                                     gpl_next = GPL_WAIT;
             GPL_WAIT:    if (gemm_done)                     gpl_next = GPL_IDLE;
+            GPL_DESC0:   if (xbar_m1_grant)                 gpl_next = GPL_DESC1;
+            GPL_DESC1:   if (xbar_m1_grant)                 gpl_next = GPL_DESC2;
+            GPL_DESC2:   if (xbar_m1_grant)                 gpl_next = GPL_DESC3;
+            GPL_DESC3:   if (xbar_m1_grant)                 gpl_next = GPL_DESC4;
+            GPL_DESC4:   if (xbar_m1_grant)                 gpl_next = GPL_LOAD_B0;
             default:     gpl_next = GPL_IDLE;
         endcase
     end
 
-    assign m1_req   = (gpl_state == GPL_LOAD_B0 || gpl_state == GPL_LOAD_B1 ||
+    assign m1_req   = (gpl_state == GPL_DESC0 || gpl_state == GPL_DESC1 ||
+                       gpl_state == GPL_DESC2 || gpl_state == GPL_DESC3 ||
+                       gpl_state == GPL_DESC4 ||
+                       gpl_state == GPL_LOAD_B0 || gpl_state == GPL_LOAD_B1 ||
                        gpl_state == GPL_LOAD_B2 || gpl_state == GPL_LOAD_B3 ||
                        gpl_state == GPL_LOAD_A);
     assign m1_addr  = gpl_read_addr;
@@ -753,7 +839,7 @@ module npu_top #(
         end
     endgenerate
 
-    assign gemm_wb_addr  = `OSRAM_BASE + {gemm_wb_cnt, 2'b00};
+    assign gemm_wb_addr  = gpl_o_base + {gemm_wb_cnt, 2'b00};
     assign gemm_wb_wdata = wb_word_arr[gemm_wb_cnt];
 
     // M2 is exclusively used by GEMM writeback. VALU/SFU have no
@@ -873,7 +959,7 @@ module npu_top #(
         npu_busy,                           // [11] aggregated busy
         gemm_wb_active,                     // [10] GEMM writeback FSM active
         dma_br_state,                       // [9:8] DMA bridge FSM state
-        gpl_state,                          // [7:5] GEMM preloader FSM state
+        gpl_state[2:0],                     // [7:5] GEMM preloader FSM state
         bridge_busy,                        // [4] DMA bridge busy
         dma_busy,                           // [3] DMA engine busy
         sfu_busy,                           // [2] SFU busy
