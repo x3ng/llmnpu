@@ -84,7 +84,7 @@ static int wait_busy_clear(const char tag)
 //
 // Golden for each 16-deep slice is precomputed in golden_C.
 // ------------------------------------------------------------
-static const int8_t test_A[256] __attribute__((aligned(4))) = {
+static const int8_t test_A[256] __attribute__((aligned(8))) = {
      -3,  -2,  -1,   0,   1,   2,   3,  -3,  -2,  -1,   0,   1,   2,   3,  -3,  -2,
      -2,  -1,   0,   1,   2,   3,  -3,  -2,  -1,   0,   1,   2,   3,  -3,  -2,  -1,
      -1,   0,   1,   2,   3,  -3,  -2,  -1,   0,   1,   2,   3,  -3,  -2,  -1,   0,
@@ -103,7 +103,7 @@ static const int8_t test_A[256] __attribute__((aligned(4))) = {
      -2,  -1,   0,   1,   2,   3,  -3,  -2,  -1,   0,   1,   2,   3,  -3,  -2,  -1
 };
 
-static const int8_t test_B[256] __attribute__((aligned(4))) = {
+static const int8_t test_B[256] __attribute__((aligned(8))) = {
      -3,  -2,  -1,   0,   1,   2,   3,  -3,  -2,  -1,   0,   1,   2,   3,  -3,  -2,
       0,   1,   2,   3,  -3,  -2,  -1,   0,   1,   2,   3,  -3,  -2,  -1,   0,   1,
       3,  -3,  -2,  -1,   0,   1,   2,   3,  -3,  -2,  -1,   0,   1,   2,   3,  -3,
