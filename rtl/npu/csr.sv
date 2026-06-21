@@ -200,7 +200,8 @@ module csr (
     assign dma_length     = dma_csr2[15:0];
     assign dma_row_count  = dma_csr2[31:16];
     assign dma_row_bytes  = dma_csr2[15:0];
-    assign dma_ext_stride = dma_csr3[31:16];
+    assign dma_ext_stride = (we && (waddr == A_DMA_CSR3)) ? wdata[31:16] :
+                                                                dma_csr3[31:16];
     assign dma_sram_stride= dma_csr1[31:16];
 
     // dma_csr_start: pulse when DMA_CSR3 written with bit[0] set
