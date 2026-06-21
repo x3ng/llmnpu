@@ -325,12 +325,12 @@ module npu_top #(
         .valid_out   (sfu_valid_out)
     );
 
-    logic [2:0] sfu_pipe;
+    logic [3:0] sfu_pipe;
     always_ff @(posedge clk or negedge dp_rst_n) begin
         if (!dp_rst_n)
-            sfu_pipe <= 3'd0;
+            sfu_pipe <= 4'd0;
         else
-            sfu_pipe <= {sfu_pipe[1:0], sfu_valid_in_gated};
+            sfu_pipe <= {sfu_pipe[2:0], sfu_valid_in_gated};
     end
     assign sfu_busy = |sfu_pipe;
 

@@ -44,6 +44,7 @@ CSR_PERF_CYC  = 0x20
 OP_GEMM       = 0x01
 OP_VADD       = 0x10
 OP_ACT_RELU   = 0x20
+OP_QUANT      = 0x30
 OP_DMA_ST     = 0x41
 OP_SYNC       = 0xF0
 OP_WFI        = 0xF1
@@ -876,6 +877,43 @@ async def test_csr_halt_stalls_ifid_only(dut):
 
     assert dispatched, "IF/ID did not resume dispatch after CSR_CTRL.HALT cleared"
     dut._log.info("PASS: CSR CTRL.HALT stalls IF/ID dispatch and resumes cleanly")
+
+
+@cocotb.test()
+async def test_ifid_quant_sfu_busy_covers_valid(dut):
+    """IF/ID OP_QUANT keeps SFU busy until the aligned quant valid_out."""
+    await setup_dut(dut)
+
+    dut.rst_n.value = 1
+    await RisingEdge(dut.clk)
+    await Timer(1, unit="ps")
+
+    await csr_write(dut, CSR_CTRL, CSR_CTRL_RESET)
+    await if_load(dut, 0, (OP_QUANT << 24) | 0x2A)
+    await if_load(dut, 1, (OP_WFI << 24))
+    await csr_write(dut, CSR_CTRL, CSR_CTRL_START)
+
+    busy_seen = False
+    valid_seen = False
+    idle_seen = False
+    for _ in range(50):
+        await RisingEdge(dut.clk)
+        await Timer(1, unit="ps")
+        busy = int(dut.sfu_busy.value)
+        valid = int(dut.sfu_valid_out.value)
+        if busy:
+            busy_seen = True
+        if valid:
+            valid_seen = True
+            assert busy, "SFU valid_out asserted after top-level busy dropped"
+        if busy_seen and not busy:
+            idle_seen = True
+            break
+
+    assert busy_seen, "IF/ID QUANT did not make SFU busy"
+    assert valid_seen, "IF/ID QUANT did not produce SFU valid_out"
+    assert idle_seen, "SFU did not return idle after IF/ID QUANT"
+    dut._log.info("PASS: IF/ID QUANT keeps SFU busy through valid_out")
 
 
 @cocotb.test()
