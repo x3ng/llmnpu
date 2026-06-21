@@ -17,7 +17,8 @@ module csr (
     // Status inputs from NPU
     input  logic        npu_busy,
     input  logic        npu_going_idle,
-    input  logic        fault_event,
+    input  logic        dma_err_event,
+    input  logic        ill_insn_event,
     input  logic [7:0]  current_pc,
 
     // Debug signals (exposed read-only via DEBUG register)
@@ -102,8 +103,10 @@ module csr (
             // (npu_going_idle pulses one cycle before busy falls)
             if (npu_going_idle)
                 irq_stat_reg[0] <= 1'b1;
-            if (fault_event)
+            if (dma_err_event)
                 irq_stat_reg[1] <= 1'b1;
+            if (ill_insn_event)
+                irq_stat_reg[2] <= 1'b1;
 
             if (we) begin
                 case (waddr)

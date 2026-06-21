@@ -53,7 +53,9 @@
 
 // --- IRQ bits (IRQ_EN and IRQ_STAT share layout) ---
 #define IRQ_DONE          (1u << 0)
-#define IRQ_FAULT         (1u << 1)
+#define IRQ_DMA_ERR       (1u << 1)
+#define IRQ_ILL_INSN      (1u << 2)
+#define IRQ_FAULT         (IRQ_DMA_ERR | IRQ_ILL_INSN)
 
 // --- Internal SRAM layout (16-bit NPU-internal address space) ---
 #define ASRAM_BASE  0x0000u

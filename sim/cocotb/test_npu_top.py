@@ -57,8 +57,9 @@ CSR_CTRL_START = 1 << 0
 CSR_CTRL_RESET = 1 << 1
 CSR_CTRL_HALT  = 1 << 2
 
-IRQ_DONE  = 1 << 0
-IRQ_FAULT = 1 << 1
+IRQ_DONE     = 1 << 0
+IRQ_DMA_ERR  = 1 << 1
+IRQ_ILL_INSN = 1 << 2
 
 DEBUG_GPL_STATE_SHIFT = 5
 DEBUG_GPL_STATE_MASK = 0x7 << DEBUG_GPL_STATE_SHIFT
@@ -710,7 +711,7 @@ async def test_dma_invalid_length_sets_fault_irq(dut):
     await Timer(1, unit="ps")
 
     await csr_write(dut, CSR_CTRL, CSR_CTRL_RESET)
-    await csr_write(dut, CSR_IRQ_EN, IRQ_FAULT)
+    await csr_write(dut, CSR_IRQ_EN, IRQ_DMA_ERR)
     await csr_write(dut, CSR_IRQ_STAT, 0xFFFFFFFF)
     await csr_write(dut, CSR_CTRL, 0)
 
@@ -724,8 +725,11 @@ async def test_dma_invalid_length_sets_fault_irq(dut):
         await RisingEdge(dut.clk)
         await Timer(1, unit="ps")
         irq_stat = await csr_read(dut, CSR_IRQ_STAT)
-        if irq_stat & IRQ_FAULT:
+        if irq_stat & IRQ_DMA_ERR:
             fault_seen = True
+            assert not (irq_stat & IRQ_ILL_INSN), (
+                f"DMA fault also set illegal-instruction IRQ: 0x{irq_stat:08X}"
+            )
             break
 
     assert fault_seen, "invalid DMA length did not set IRQ_STAT[1]"
@@ -738,7 +742,7 @@ async def test_dma_invalid_length_sets_fault_irq(dut):
 
 @cocotb.test()
 async def test_illegal_instruction_sets_fault_irq(dut):
-    """Unknown IF/ID opcode raises IRQ_STAT[1] fault."""
+    """Unknown IF/ID opcode raises IRQ_STAT[2] fault."""
     await setup_dut(dut)
 
     dut.rst_n.value = 1
@@ -748,7 +752,7 @@ async def test_illegal_instruction_sets_fault_irq(dut):
     await csr_write(dut, CSR_CTRL, CSR_CTRL_RESET)
     await if_load(dut, 0, 0xEE000000)
     await if_load(dut, 1, (OP_VADD << 24) | (1 << 16) | (2 << 8) | 3)
-    await csr_write(dut, CSR_IRQ_EN, IRQ_FAULT)
+    await csr_write(dut, CSR_IRQ_EN, IRQ_ILL_INSN)
     await csr_write(dut, CSR_IRQ_STAT, 0xFFFFFFFF)
     await csr_write(dut, CSR_CTRL, CSR_CTRL_START)
 
@@ -757,11 +761,14 @@ async def test_illegal_instruction_sets_fault_irq(dut):
         await RisingEdge(dut.clk)
         await Timer(1, unit="ps")
         irq_stat = await csr_read(dut, CSR_IRQ_STAT)
-        if irq_stat & IRQ_FAULT:
+        if irq_stat & IRQ_ILL_INSN:
             fault_seen = True
+            assert not (irq_stat & IRQ_DMA_ERR), (
+                f"illegal instruction also set DMA error IRQ: 0x{irq_stat:08X}"
+            )
             break
 
-    assert fault_seen, "illegal instruction did not set IRQ_STAT[1]"
+    assert fault_seen, "illegal instruction did not set IRQ_STAT[2]"
     assert int(dut.irq.value) == 1, "fault IRQ output did not assert"
 
     await ClockCycles(dut.clk, 4)
