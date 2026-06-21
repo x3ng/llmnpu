@@ -24,6 +24,8 @@ async def setup_reset(dut):
     dut.mem_we.value = 0
     dut.mem_addr.value = 0
     dut.mem_wdata.value = 0
+    dut.pc_we.value = 0
+    dut.pc_wdata.value = 0
     dut.halt.value = 0
     dut.gemm_busy.value = 0
     dut.valu_busy.value = 0
@@ -296,6 +298,48 @@ async def test_wfi_halts_dispatch(dut):
 
     assert int(dut.stall_if.value), "WFI should hold stall_if high after halt"
     dut._log.info("PASS: Test 5 WFI halts fetch/dispatch")
+
+
+@cocotb.test()
+async def test_pc_load_sets_fetch_address(dut):
+    """PC load redirects the next fetched instruction."""
+    await setup_reset(dut)
+
+    await load_instrs(dut, [
+        NOP,
+        NOP,
+        NOP,
+        NOP,
+        0x01020304,
+        NOP,
+    ])
+
+    dut.rst_n.value = 1
+    await Timer(1, unit='ns')
+
+    dut.pc_we.value = 1
+    dut.pc_wdata.value = 4
+    await RisingEdge(dut.clk)
+    await ReadOnly()
+    assert int(dut.current_pc.value) == 4, \
+        f"current_pc={int(dut.current_pc.value)} != 4 after pc_we"
+    assert not int(dut.gemm_cmd_valid.value), \
+        "PC load should clear current decode stage"
+    await Timer(1, unit='ns')
+
+    dut.pc_we.value = 0
+    await RisingEdge(dut.clk)
+    await ReadOnly()
+    assert int(dut.debug_instr.value) == 0x01020304, \
+        f"debug_instr=0x{int(dut.debug_instr.value):08X} != 0x01020304"
+
+    await RisingEdge(dut.clk)
+    await ReadOnly()
+    assert int(dut.gemm_cmd_valid.value), \
+        "GEMM at loaded PC did not dispatch"
+    assert int(dut.gemm_cmd.value) == 0x01020304
+
+    dut._log.info("PASS: PC load redirects IF/ID fetch")
 
 
 @cocotb.test()

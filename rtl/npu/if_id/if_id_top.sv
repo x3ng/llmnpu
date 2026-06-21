@@ -4,11 +4,14 @@ module if_id_top (
     input  logic        mem_we,
     input  logic [7:0]  mem_addr,
     input  logic [31:0] mem_wdata,
+    input  logic        pc_we,
+    input  logic [7:0]  pc_wdata,
     input  logic        halt,
     input  logic        gemm_busy, valu_busy, sfu_busy, dma_busy,
     output logic        gemm_cmd_valid, valu_cmd_valid, sfu_cmd_valid, dma_cmd_valid,
     output logic [31:0] gemm_cmd, valu_cmd, sfu_cmd, dma_cmd,
     output logic [7:0]  debug_pc,
+    output logic [7:0]  current_pc,
     output logic [31:0] debug_instr,
     output logic        stall_if,
     output logic [31:0] debug_imem0
@@ -67,15 +70,23 @@ module if_id_top (
             sfu_cmd_valid  <= 1'b0; sfu_cmd  <= 32'd0;
             dma_cmd_valid  <= 1'b0; dma_cmd  <= 32'd0;
         end else begin
-            // ---- stall_if register ----
-            stall_if <= stall_w;
+            if (pc_we) begin
+                pc       <= pc_wdata;
+                id_pc    <= 8'd0;
+                id_instr <= 32'd0;
+                id_valid <= 1'b0;
+                stall_if <= 1'b1;
+            end else begin
+                // ---- stall_if register ----
+                stall_if <= stall_w;
 
-            // ---- Advance pipeline when not stalled ----
-            if (!stall_w && !dispatch_wfi) begin
+                // ---- Advance pipeline when not stalled ----
+                if (!stall_w && !dispatch_wfi) begin
                 id_instr <= fetch_instr;
                 id_pc    <= pc;
                 id_valid <= 1'b1;
                 pc       <= pc + 8'd1;
+                end
             end
 
             // ---- Dispatch: pulse cmd valid ----
@@ -99,6 +110,7 @@ module if_id_top (
     end
 
     assign debug_pc    = id_pc;
+    assign current_pc  = pc;
     assign debug_instr = id_instr;
 
 endmodule

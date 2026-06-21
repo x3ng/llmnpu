@@ -17,6 +17,7 @@ module csr (
     // Status inputs from NPU
     input  logic        npu_busy,
     input  logic        npu_going_idle,
+    input  logic [7:0]  current_pc,
 
     // Debug signals (exposed read-only via DEBUG register)
     input  logic [31:0] debug_signals,
@@ -25,6 +26,8 @@ module csr (
     output logic        npu_start,
     output logic        npu_rst,
     output logic        npu_halt,
+    output logic        pc_we,
+    output logic [7:0]  pc_wdata,
     output logic [7:0]  issue_opcode,
 
     // DMA CSR register outputs (for top-level DMA wiring)
@@ -68,7 +71,6 @@ module csr (
     // ----------------------------------------------------------------
     logic [31:0] ctrl_reg;
     logic [31:0] status_reg;
-    logic [31:0] pc_reg;
     logic [31:0] desc_ptr_reg;
     logic [31:0] dma_csr0, dma_csr1, dma_csr2, dma_csr3;
     logic [31:0] irq_en_reg;
@@ -83,7 +85,6 @@ module csr (
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             ctrl_reg       <= 32'd0;
-            pc_reg         <= 32'd0;
             desc_ptr_reg   <= 32'd0;
             dma_csr0       <= 32'd0;
             dma_csr1       <= 32'd0;
@@ -104,7 +105,6 @@ module csr (
             if (we) begin
                 case (waddr)
                     A_CTRL:      ctrl_reg     <= wdata;
-                    A_PC:        pc_reg       <= wdata;
                     A_DESC_PTR:  desc_ptr_reg <= wdata;
                     A_DMA_CSR0:  dma_csr0     <= wdata;
                     A_DMA_CSR1:  dma_csr1     <= wdata;
@@ -126,7 +126,7 @@ module csr (
         case (waddr)
             A_CTRL:      rdata = ctrl_reg;
             A_STATUS:    rdata = status_reg;
-            A_PC:        rdata = pc_reg;
+            A_PC:        rdata = {24'd0, current_pc};
             A_DESC_PTR:  rdata = desc_ptr_reg;
             A_DMA_CSR0:  rdata = dma_csr0;
             A_DMA_CSR1:  rdata = dma_csr1;
@@ -172,6 +172,8 @@ module csr (
 
     assign npu_rst = ctrl_reg[1];
     assign npu_halt = ctrl_reg[2];
+    assign pc_we = we && (waddr == A_PC);
+    assign pc_wdata = wdata[7:0];
     assign issue_opcode = (we && (waddr == A_CTRL)) ? wdata[15:8] : ctrl_reg[15:8];
 
     // ----------------------------------------------------------------

@@ -90,6 +90,9 @@ module npu_top #(
     logic [31:0] csr_desc_ptr;
     logic [7:0]  csr_issue_opcode;
     logic        csr_halt;
+    logic        csr_pc_we;
+    logic [7:0]  csr_pc_wdata;
+    logic [7:0]  if_current_pc;
 
     // ================================================================
     // Running flag
@@ -128,10 +131,13 @@ module npu_top #(
         .rdata           (csr_rdata),
         .npu_busy        (npu_busy),
         .npu_going_idle  (npu_going_idle),
+        .current_pc      (if_current_pc),
         .debug_signals   (debug_signals),
         .npu_start       (csr_start),
         .npu_rst         (csr_rst),
         .npu_halt        (csr_halt),
+        .pc_we           (csr_pc_we),
+        .pc_wdata        (csr_pc_wdata),
         .issue_opcode    (csr_issue_opcode),
         .dma_ext_addr    (csr_dma_ext_addr),
         .dma_sram_addr   (csr_dma_sram_addr),
@@ -169,6 +175,8 @@ module npu_top #(
         .mem_we         (dbg_imem_we),
         .mem_addr       (dbg_imem_addr),
         .mem_wdata      (dbg_imem_wdata),
+        .pc_we          (csr_pc_we),
+        .pc_wdata       (csr_pc_wdata),
         .halt           (csr_halt || !running),
         .gemm_busy      (ifid_gemm_busy),
         .valu_busy      (valu_busy),
@@ -183,6 +191,7 @@ module npu_top #(
         .sfu_cmd        (sfu_cmd),
         .dma_cmd        (dma_cmd),
         .debug_pc       (debug_pc),
+        .current_pc     (if_current_pc),
         .debug_instr    (debug_instr),
         .stall_if       (if_stall)
     );

@@ -734,6 +734,41 @@ async def test_csr_start_releases_ifid_pc(dut):
 
 
 @cocotb.test()
+async def test_csr_pc_sets_ifid_start_address(dut):
+    """CSR PC write sets the IF/ID fetch start address."""
+    await setup_dut(dut)
+
+    dut.rst_n.value = 1
+    await RisingEdge(dut.clk)
+    await Timer(1, unit="ps")
+
+    vadd_instr = (OP_VADD << 24) | (1 << 16) | (2 << 8) | 3
+    await csr_write(dut, CSR_CTRL, CSR_CTRL_RESET)
+    for i in range(4):
+        await if_load(dut, i, (OP_WFI << 24))
+    await if_load(dut, 4, vadd_instr)
+    await if_load(dut, 5, (OP_WFI << 24))
+
+    await csr_write(dut, CSR_CTRL, 0)
+    await csr_write(dut, CSR_PC, 4)
+    pc = await csr_read(dut, CSR_PC)
+    assert pc == 4, f"CSR_PC readback expected 4, got {pc}"
+
+    await csr_write(dut, CSR_CTRL, CSR_CTRL_START)
+    dispatched = False
+    for _ in range(8):
+        await RisingEdge(dut.clk)
+        await Timer(1, unit="ps")
+        if int(dut.valu_cmd_valid.value):
+            dispatched = True
+            assert int(dut.valu_cmd.value) == vadd_instr
+            break
+
+    assert dispatched, "IF/ID did not dispatch instruction at CSR_PC start address"
+    dut._log.info("PASS: CSR PC sets IF/ID start address")
+
+
+@cocotb.test()
 async def test_csr_halt_stalls_ifid_only(dut):
     """CSR CTRL.HALT stops IF/ID dispatch without resetting datapath state."""
     await setup_dut(dut)
