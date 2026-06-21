@@ -151,6 +151,7 @@ module npu_top #(
     logic        gemm_cmd_valid, valu_cmd_valid, sfu_cmd_valid, dma_cmd_valid;
     logic [31:0] gemm_cmd, valu_cmd, sfu_cmd, dma_cmd;
     logic        gemm_busy, valu_busy, sfu_busy, dma_busy;
+    logic        ifid_gemm_busy;
     logic        if_stall;
     logic        gemm_issue_valid;
     logic [31:0] gemm_issue_cmd;
@@ -165,7 +166,7 @@ module npu_top #(
         .mem_we         (dbg_imem_we),
         .mem_addr       (dbg_imem_addr),
         .mem_wdata      (dbg_imem_wdata),
-        .gemm_busy      (gemm_busy),
+        .gemm_busy      (ifid_gemm_busy),
         .valu_busy      (valu_busy),
         .sfu_busy       (sfu_busy),
         .dma_busy       (dma_busy),
@@ -1077,6 +1078,8 @@ module npu_top #(
     logic gemm_preload_busy;
     assign bridge_busy = (dma_br_state != DMA_BR_IDLE);
     assign gemm_preload_busy = (gpl_state != GPL_IDLE);
+    assign ifid_gemm_busy = gemm_cmd_valid || gemm_busy || gemm_preload_busy ||
+                            gemm_psum_valid || gemm_wb_active;
 
     assign npu_busy = gemm_busy || valu_busy || sfu_busy || dma_busy ||
                       bridge_busy || gemm_preload_busy ||

@@ -42,7 +42,10 @@ CSR_DEBUG     = 0x18
 CSR_PERF_CYC  = 0x20
 
 OP_GEMM       = 0x01
+OP_VADD       = 0x10
 OP_ACT_RELU   = 0x20
+OP_SYNC       = 0xF0
+OP_WFI        = 0xF1
 
 DMA_CSR3_START   = 1 << 0
 DMA_CSR3_DIR_ST  = 1 << 1
@@ -360,6 +363,61 @@ async def test_ifid_gemm_uses_descriptor_ref(dut):
         f"latched=0x{int(dut.gpl_desc_ptr_latched.value):04X}"
     )
     dut._log.info("PASS: IF/ID GEMM descriptor reference selects K=2 descriptor")
+
+
+@cocotb.test()
+async def test_ifid_sync_waits_for_gemm_path(dut):
+    """SYNC holds later IF/ID instructions until GEMM preload/compute/WB is idle."""
+    await setup_dut(dut)
+
+    dut.rst_n.value = 1
+    await RisingEdge(dut.clk)
+    await Timer(1, unit="ps")
+
+    await csr_write(dut, CSR_CTRL, 0x00000002)
+
+    dsram_write_word(dut, DSRAM_BASE + 0, 0x00010001)  # M=1, N=1
+    dsram_write_word(dut, DSRAM_BASE + 4, 0x01000001)  # K=1, A=0, B=1
+    dsram_write_word(dut, DSRAM_BASE + 8, 0x00000002)  # O=2
+    dsram_write_word(dut, DSRAM_BASE + 12, 0x00000000)
+    dsram_write_word(dut, DSRAM_BASE + 16, 0x00000000)
+
+    await valu_write_reg(dut, 1, [1] * 64)
+    await valu_write_reg(dut, 2, [2] * 64)
+
+    await if_load(dut, 0, (OP_GEMM << 24))
+    await if_load(dut, 1, (OP_SYNC << 24))
+    await if_load(dut, 2, (OP_VADD << 24) | (3 << 16) | (1 << 8) | 2)
+    await if_load(dut, 3, (OP_WFI << 24))
+    await Timer(1, unit="ps")
+
+    await csr_write(dut, CSR_DESC_PTR, DSRAM_BASE)
+    await csr_write(dut, CSR_CTRL, 0x00000000)
+
+    gemm_path_seen = False
+    stall_seen = False
+    valu_seen = False
+    for _ in range(1600):
+        await RisingEdge(dut.clk)
+        await Timer(1, unit="ps")
+        gemm_path_busy = int(dut.ifid_gemm_busy.value)
+        valu_valid = int(dut.valu_cmd_valid.value)
+
+        if gemm_path_busy:
+            gemm_path_seen = True
+        if int(dut.if_stall.value):
+            stall_seen = True
+        assert not (valu_valid and gemm_path_busy), (
+            "SYNC allowed VADD dispatch while GEMM path was still busy"
+        )
+        if valu_valid:
+            valu_seen = True
+            break
+
+    assert gemm_path_seen, "GEMM path never became busy"
+    assert stall_seen, "SYNC never stalled the IF/ID stream"
+    assert valu_seen, "VADD after SYNC did not dispatch after GEMM path completed"
+    dut._log.info("PASS: IF/ID SYNC waits for full GEMM path before VADD")
 
 
 @cocotb.test()
