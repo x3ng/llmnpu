@@ -119,8 +119,8 @@ GEMM_DESCRIPTOR_SIZE = 19
 
 def build_gemm_descriptor(
     m: int = 1,
-    n: int = 16,
-    k: int = 16,
+    n: int = 1,
+    k: int = 1,
     a_sram_bank: int = 0,
     b_sram_bank: int = 1,
     o_sram_bank: int = 0,
@@ -135,7 +135,7 @@ def build_gemm_descriptor(
 
     Layout (19 bytes)::
 
-        [ 0] M              uint16  tile count (×16)
+        [ 0] M              uint16  output-row tile count (x16)
         [ 2] N              uint16
         [ 4] K              uint16
         [ 6] a_sram_bank    uint8

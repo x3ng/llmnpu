@@ -170,7 +170,7 @@ class TestSerialize:
 
     def test_build_gemm_descriptor_fields(self):
         desc = build_gemm_descriptor(
-            m=2, n=32, k=64,
+            m=2, n=3, k=4,
             a_sram_bank=1, b_sram_bank=2, o_sram_bank=3,
             a_zp=10, b_zp=20,
             out_scale_shr=4, out_scale_mul=100,
@@ -178,8 +178,8 @@ class TestSerialize:
         )
         m, n, k = struct.unpack_from("<HHH", desc, 0)
         assert m == 2
-        assert n == 32
-        assert k == 64
+        assert n == 3
+        assert k == 4
 
         a_bank, b_bank, o_bank = struct.unpack_from("<BBB", desc, 6)
         assert a_bank == 1
@@ -223,7 +223,7 @@ class TestSerialize:
                 NpuInstruction(opcode=Opcode.ACT_RELU, dst=0, src_a=0),
             ],
             descriptors=[
-                build_gemm_descriptor(m=1, n=16, k=16),
+                build_gemm_descriptor(m=1, n=1, k=1),
             ],
         )
         with tempfile.NamedTemporaryFile(suffix=".npu", delete=False) as f:

@@ -24,6 +24,8 @@ typedef struct {
 //     from rtl/include/isa_defines.svh (152 bits = 19 bytes packed) ---
 typedef struct {
     uint16_t M, N, K;               // tile counts (each x16)
+                                    // Current RTL issue consumes one M/N tile;
+                                    // runtime loops output tiles in software.
     uint8_t  a_sram_bank;           // activation SRAM bank index
     uint8_t  b_sram_bank;           // weight    SRAM bank index
     uint8_t  o_sram_bank;           // output    SRAM bank index

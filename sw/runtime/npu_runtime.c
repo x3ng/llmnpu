@@ -88,8 +88,10 @@ int npu_rt_gemm(npu_dev_t *d, const npu_gemm_args_t *args)
             // Build and issue one GEMM descriptor for the whole K slab.
             gemm_desc_t desc;
             memset(&desc, 0, sizeof(desc));
-            desc.M             = 1;   // one 16-row output tile
-            desc.N             = 1;   // one 16-col output tile
+            // One RTL issue computes one 16x16 output tile.  M/N tiling is
+            // handled by these software loops; K tiling is handled by RTL.
+            desc.M             = 1;
+            desc.N             = 1;
             desc.K             = (uint16_t)k_tiles;
             desc.a_sram_bank   = BANK_A;
             desc.b_sram_bank   = BANK_W;

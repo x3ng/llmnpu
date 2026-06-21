@@ -39,7 +39,9 @@
 
 // --- GEMM Descriptor (152 bits = 19 bytes, packed struct) ---
 typedef struct packed {
-    logic [15:0] M, N, K;        // tile counts (each ×16)
+    logic [15:0] M, N, K;        // tile counts (each x16)
+                                  // RTL issue path consumes one M/N tile;
+                                  // runtime loops M/N output tiles.
     logic [7:0]  a_sram_bank;
     logic [7:0]  b_sram_bank;
     logic [7:0]  o_sram_bank;
