@@ -257,6 +257,72 @@ async def test_sfu_tanh(dut):
 
 
 @cocotb.test()
+async def test_sfu_output_uses_issued_opcode_not_current_opcode(dut):
+    """In-flight SFU results use the opcode captured with valid_in."""
+    clock = Clock(dut.clk, 2, unit="ns")
+    cocotb.start_soon(clock.start())
+    dut.valid_in.value = 0
+    await reset_dut(dut)
+
+    # Issue QUANT, then change opcode to ReLU while the quant result is
+    # still in flight.  The result must still come from quant_dequant.
+    dut.opcode.value = OP_QUANT
+    dut.x_in.value = 31
+    dut.zp.value = 7
+    dut.scale_mul.value = 3
+    dut.scale_shr.value = 1
+    dut.valid_in.value = 1
+    await RisingEdge(dut.clk)
+    await Timer(1, unit="ps")
+
+    dut.opcode.value = OP_ACT_RELU
+    dut.x_in.value = (-5) & 0xFF
+    dut.valid_in.value = 0
+    expected_quant = golden_qd(OP_QUANT, 31, 7, 3, 1)
+
+    quant_seen = False
+    for _ in range(SFU_LATENCY + 4):
+        await RisingEdge(dut.clk)
+        await Timer(1, unit="ps")
+        if int(dut.valid_out.value):
+            actual = dut.y_out.value.to_signed()
+            assert actual == expected_quant, (
+                f"in-flight QUANT selected wrong path: expected "
+                f"{expected_quant}, got {actual}"
+            )
+            quant_seen = True
+            break
+    assert quant_seen, "in-flight QUANT never produced valid_out"
+
+    # Issue ReLU, then change opcode to QUANT with valid_in low.  The result
+    # must still come from the ReLU path.
+    dut.opcode.value = OP_ACT_RELU
+    dut.x_in.value = (-12) & 0xFF
+    dut.valid_in.value = 1
+    await RisingEdge(dut.clk)
+    await Timer(1, unit="ps")
+
+    dut.opcode.value = OP_QUANT
+    dut.x_in.value = 127
+    dut.valid_in.value = 0
+
+    relu_seen = False
+    for _ in range(SFU_LATENCY + 4):
+        await RisingEdge(dut.clk)
+        await Timer(1, unit="ps")
+        if int(dut.valid_out.value):
+            actual = dut.y_out.value.to_signed()
+            assert actual == 0, (
+                f"in-flight ReLU selected wrong path: expected 0, got {actual}"
+            )
+            relu_seen = True
+            break
+    assert relu_seen, "in-flight ReLU never produced valid_out"
+
+    dut._log.info("  output opcode alignment: in-flight results PASS")
+
+
+@cocotb.test()
 async def test_sfu_quant_dequant(dut):
     """SFU quant/dequant: verify identity and constant-scale paths."""
     clock = Clock(dut.clk, 2, unit="ns")

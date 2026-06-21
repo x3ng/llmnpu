@@ -39,6 +39,16 @@ module sfu_top (
     logic        lut_valid;
     logic [7:0]  lut_y;
     logic [1:0]  func_sel;
+    logic        lut_valid_in;
+    logic        relu_valid_in;
+    logic        qd_valid_in;
+
+    assign relu_valid_in = valid_in && (opcode == `OP_ACT_RELU);
+    assign lut_valid_in  = valid_in && ((opcode == `OP_ACT_GELU) ||
+                                        (opcode == `OP_ACT_SIGMOID) ||
+                                        (opcode == `OP_ACT_TANH));
+    assign qd_valid_in   = valid_in && ((opcode == `OP_QUANT) ||
+                                        (opcode == `OP_DEQUANT));
 
     always_comb begin
         unique case (opcode)
@@ -58,7 +68,7 @@ module sfu_top (
         .rst_n    (rst_n),
         .func_sel (func_sel),
         .x_in     (x_in),
-        .valid_in (valid_in),
+        .valid_in (lut_valid_in),
         .y_out    (lut_y),
         .valid_out(lut_valid)
     );
@@ -77,7 +87,7 @@ module sfu_top (
             relu_valid <= 1'b0;
         end else begin
             relu_y     <= x_in[7] ? 8'd0 : x_in;
-            relu_valid <= valid_in;
+            relu_valid <= relu_valid_in;
         end
     end
 
@@ -97,8 +107,16 @@ module sfu_top (
     logic        qd_valid;
     logic [7:0]  qd_y;
     logic        qd_mode;
+    logic        qd_mode_latched;
 
-    assign qd_mode = (opcode == `OP_QUANT) ? 1'b1 : 1'b0;
+    assign qd_mode = qd_valid_in ? (opcode == `OP_QUANT) : qd_mode_latched;
+
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n)
+            qd_mode_latched <= 1'b0;
+        else if (qd_valid_in)
+            qd_mode_latched <= (opcode == `OP_QUANT);
+    end
 
     quant_dequant u_qd (
         .clk       (clk),
@@ -108,7 +126,7 @@ module sfu_top (
         .zp        (zp),
         .scale_mul (scale_mul),
         .scale_shr (scale_shr),
-        .valid_in  (valid_in),
+        .valid_in  (qd_valid_in),
         .y_out     (qd_y),
         .valid_out (qd_valid)
     );
@@ -142,27 +160,19 @@ module sfu_top (
             y_out    <= 8'd0;
             valid_out <= 1'b0;
         end else begin
-            unique case (opcode)
-                `OP_ACT_RELU: begin
+            if (relu_valid_aligned) begin
                     y_out    <= relu_y_aligned;
-                    valid_out <= relu_valid_aligned;
-                end
-                `OP_ACT_GELU,
-                `OP_ACT_SIGMOID,
-                `OP_ACT_TANH: begin
+                    valid_out <= 1'b1;
+            end else if (lut_valid_aligned) begin
                     y_out    <= lut_y_aligned;
-                    valid_out <= lut_valid_aligned;
-                end
-                `OP_QUANT,
-                `OP_DEQUANT: begin
+                    valid_out <= 1'b1;
+            end else if (qd_valid) begin
                     y_out    <= qd_y;
-                    valid_out <= qd_valid;
-                end
-                default: begin
+                    valid_out <= 1'b1;
+            end else begin
                     y_out    <= 8'd0;
                     valid_out <= 1'b0;
-                end
-            endcase
+            end
         end
     end
 
