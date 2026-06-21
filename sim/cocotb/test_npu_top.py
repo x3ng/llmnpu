@@ -44,6 +44,7 @@ CSR_PERF_CYC  = 0x20
 OP_GEMM       = 0x01
 OP_VADD       = 0x10
 OP_ACT_RELU   = 0x20
+OP_DMA_ST     = 0x41
 OP_SYNC       = 0xF0
 OP_WFI        = 0xF1
 
@@ -563,6 +564,54 @@ async def test_csr_dma_2d_store_prefill_strided(dut):
         )
 
     dut._log.info("PASS: CSR DMA 2D STORE bridge prefill uses SRAM stride")
+
+
+@cocotb.test()
+async def test_ifid_dma_store_prefills_dma_sram(dut):
+    """IF/ID DMA_ST uses the crossbar prefill path before starting STORE."""
+    await setup_dut(dut)
+
+    dut.rst_n.value = 1
+    await RisingEdge(dut.clk)
+    await Timer(1, unit="ps")
+
+    await csr_write(dut, CSR_CTRL, 0x00000002)
+
+    sram_base = OSRAM_BASE
+    length = 8
+    expected = 0x55667788_11223344
+    osram_write_word(dut, sram_base + 0, expected & 0xFFFFFFFF)
+    osram_write_word(dut, sram_base + 4, expected >> 32)
+
+    await csr_write(dut, CSR_DMA_CSR0, 0x00000800)
+    await csr_write(dut, CSR_DMA_CSR1, sram_base)
+    await csr_write(dut, CSR_DMA_CSR2, length)
+
+    await if_load(dut, 0, (OP_DMA_ST << 24))
+    await if_load(dut, 1, (OP_WFI << 24))
+    await Timer(1, unit="ps")
+
+    await csr_write(dut, CSR_CTRL, 0x00000000)
+
+    prefill_writes = 0
+    for _ in range(120):
+        await RisingEdge(dut.clk)
+        await Timer(1, unit="ps")
+        if int(dut.dma_sim_sram_we.value):
+            prefill_writes += 1
+        if prefill_writes >= 2:
+            break
+
+    assert prefill_writes >= 2, "IF/ID DMA_ST did not prefill DMA SRAM"
+    await RisingEdge(dut.clk)
+    await Timer(1, unit="ps")
+    got_lo = dma_sram_read_word(dut, sram_base + 0)
+    got_hi = dma_sram_read_word(dut, sram_base + 4)
+    got = got_lo | (got_hi << 32)
+    assert got == expected, (
+        f"IF/ID DMA_ST prefill expected 0x{expected:016X}, got 0x{got:016X}"
+    )
+    dut._log.info("PASS: IF/ID DMA_ST prefill copies O-SRAM into DMA SRAM")
 
 
 @cocotb.test()

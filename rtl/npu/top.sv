@@ -152,6 +152,7 @@ module npu_top #(
     logic [31:0] gemm_cmd, valu_cmd, sfu_cmd, dma_cmd;
     logic        gemm_busy, valu_busy, sfu_busy, dma_busy;
     logic        ifid_gemm_busy;
+    logic        ifid_dma_busy;
     logic        if_stall;
     logic        gemm_issue_valid;
     logic [31:0] gemm_issue_cmd;
@@ -169,7 +170,7 @@ module npu_top #(
         .gemm_busy      (ifid_gemm_busy),
         .valu_busy      (valu_busy),
         .sfu_busy       (sfu_busy),
-        .dma_busy       (dma_busy),
+        .dma_busy       (ifid_dma_busy),
         .gemm_cmd_valid (gemm_cmd_valid),
         .valu_cmd_valid (valu_cmd_valid),
         .sfu_cmd_valid  (sfu_cmd_valid),
@@ -322,6 +323,7 @@ module npu_top #(
     logic [7:0]  dma_opcode;
     logic [7:0]  dma_opcode_latched;
     logic        dma_done;
+    wire         dma_cmd_is_store = dma_cmd_valid && (dma_cmd[31:24] == `OP_DMA_ST);
 
     // Bridge state type
     typedef enum logic [1:0] {
@@ -332,7 +334,8 @@ module npu_top #(
 
     dma_br_state_t dma_br_state, dma_br_next;
 
-    wire prefill_entering = (dma_br_state == DMA_BR_IDLE) && (csr_dma_start && csr_dma_is_store);
+    wire prefill_entering = (dma_br_state == DMA_BR_IDLE) &&
+                             ((csr_dma_start && csr_dma_is_store) || dma_cmd_is_store);
     wire prefill_active   = (dma_br_state == DMA_BR_PREFILL);
     wire prefill_done     = prefill_active && (dma_br_next == DMA_BR_IDLE);
 
@@ -344,7 +347,7 @@ module npu_top #(
             dma_restart <= prefill_done;
     end
 
-    assign dma_start  = dma_cmd_valid
+    assign dma_start  = (dma_cmd_valid && ~prefill_entering)
                       || (csr_dma_start && ~prefill_entering)
                       || dma_restart;
 
@@ -549,7 +552,7 @@ module npu_top #(
             DMA_BR_IDLE: begin
                 if (dma_done && dma_opcode_latched == `OP_DMA_LD)
                     dma_br_next = DMA_BR_COPY;
-                else if (csr_dma_start && csr_dma_is_store)
+                else if ((csr_dma_start && csr_dma_is_store) || dma_cmd_is_store)
                     dma_br_next = DMA_BR_PREFILL;
             end
             DMA_BR_COPY: begin
@@ -1080,6 +1083,7 @@ module npu_top #(
     assign gemm_preload_busy = (gpl_state != GPL_IDLE);
     assign ifid_gemm_busy = gemm_cmd_valid || gemm_busy || gemm_preload_busy ||
                             gemm_psum_valid || gemm_wb_active;
+    assign ifid_dma_busy = dma_cmd_valid || dma_busy || bridge_busy || dma_restart;
 
     assign npu_busy = gemm_busy || valu_busy || sfu_busy || dma_busy ||
                       bridge_busy || gemm_preload_busy ||
