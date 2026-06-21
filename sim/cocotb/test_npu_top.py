@@ -49,6 +49,8 @@ CSR_PERF_DMA  = 0x25
 OP_GEMM       = 0x01
 OP_VADD       = 0x10
 OP_ACT_RELU   = 0x20
+OP_ACT_RELU6  = 0x24
+OP_ACT_CLIP   = 0x25
 OP_QUANT      = 0x30
 OP_DMA_LD     = 0x40
 OP_DMA_ST     = 0x41
@@ -200,7 +202,7 @@ async def wait_sfu_idle_after_busy(dut, timeout_cycles=1200):
         await Timer(1, unit="ps")
         if int(dut.sfu_busy.value):
             busy_seen = True
-        if int(dut.sfu_mem_relu_done.value):
+        if int(dut.sfu_mem_relu_done.value) or int(dut.sfu_tile_done.value):
             done_seen = True
         if busy_seen and not int(dut.sfu_busy.value):
             assert done_seen, "SFU postprocess went idle without done pulse"
@@ -1235,7 +1237,15 @@ async def test_sfu_pingpong_input_output_relu_tile_flow(dut):
     tile0 = [((i * 3 + 0x78) & 0xFF) for i in range(256)]
     tile1 = [((i * 5 + 0x40) & 0xFF) for i in range(256)]
     exp0 = [0 if value & 0x80 else value for value in tile0]
-    exp1 = [0 if value & 0x80 else value for value in tile1]
+    exp1 = []
+    for value in tile1:
+        signed = value if value < 0x80 else value - 0x100
+        if signed < 0:
+            exp1.append(0)
+        elif signed > 10:
+            exp1.append(10)
+        else:
+            exp1.append(signed)
     dma_ext_write_bytes(dut, in0_ext, tile0)
     dma_ext_write_bytes(dut, in1_ext, tile1)
     await Timer(1, unit="ps")
@@ -1254,8 +1264,13 @@ async def test_sfu_pingpong_input_output_relu_tile_flow(dut):
     assert in1_addrs[-1] == PP_SFU_IN_BASE + PP_SFU_SIZE + 252
     assert int(dut.pp_sfu_in_active_bank.value) == 0
 
+    dsram_write_word(dut, DSRAM_BASE + 0, (OP_ACT_RELU << 16) | 256)
+    dsram_write_word(dut, DSRAM_BASE + 4, PP_SFU_IN_BASE)
+    dsram_write_word(dut, DSRAM_BASE + 8, PP_SFU_OUT_BASE)
+    dsram_write_word(dut, DSRAM_BASE + 12, 0x00000001)
+    await csr_write(dut, CSR_DESC_PTR, DSRAM_BASE)
     await csr_write(dut, CSR_CTRL, ctrl_start(OP_ACT_RELU))
-    await wait_sfu_idle_after_busy(dut, timeout_cycles=1400)
+    await wait_sfu_idle_after_busy(dut, timeout_cycles=5000)
     assert int(dut.pp_sfu_in_active_bank.value) == 1, (
         f"SFU input active bank did not advance after tile0: "
         f"in_ready={int(dut.pp_sfu_in_ready.value)} "
@@ -1277,8 +1292,9 @@ async def test_sfu_pingpong_input_output_relu_tile_flow(dut):
         f"SFU output bank0 word expected 0x{exp0_word:08X}, got 0x{got0_word:08X}"
     )
 
-    await csr_write(dut, CSR_CTRL, ctrl_start(OP_ACT_RELU))
-    await wait_sfu_idle_after_busy(dut, timeout_cycles=1400)
+    dsram_write_word(dut, DSRAM_BASE + 0, (10 << 24) | (OP_ACT_CLIP << 16) | 256)
+    await csr_write(dut, CSR_CTRL, ctrl_start(OP_ACT_CLIP))
+    await wait_sfu_idle_after_busy(dut, timeout_cycles=5000)
     assert int(dut.pp_sfu_out_active_bank.value) == 0
     got1_word = osram_read_word(dut, PP_SFU_OUT_BASE + PP_SFU_SIZE)
     exp1_word = exp1[0] | (exp1[1] << 8) | (exp1[2] << 16) | (exp1[3] << 24)

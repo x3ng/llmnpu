@@ -87,4 +87,27 @@ typedef struct packed {
     logic [23:0] reserved4;
 } valu_desc_t;
 
+// --- SFU Descriptor (16 bytes, 4 words) ---
+// CSR issue path consumes this descriptor from CSR_DESC_PTR when operating on
+// the SFU input/output SRAM ping-pong windows:
+//   word0[15:0]  len_bytes, 0 means one 256B tile
+//   word0[23:16] SFU opcode (`OP_ACT_*, `OP_QUANT, `OP_DEQUANT)
+//   word0[31:24] zero point / clip threshold
+//   word1[15:0]  input SRAM byte address
+//   word2[15:0]  output SRAM byte address
+//   word3[15:0]  scale_mul
+//   word3[23:16] scale_shr
+typedef struct packed {
+    logic [15:0] len_bytes;
+    logic [7:0]  opcode;
+    logic [7:0]  zp;
+    logic [15:0] in_addr;
+    logic [15:0] reserved0;
+    logic [15:0] out_addr;
+    logic [15:0] reserved1;
+    logic [15:0] scale_mul;
+    logic [7:0]  scale_shr;
+    logic [7:0]  reserved2;
+} sfu_desc_t;
+
 `endif // ISA_DEFINES_SVH

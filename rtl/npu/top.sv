@@ -356,24 +356,52 @@ module npu_top #(
     logic [31:0] sfu_mem_wdata;
     logic        sfu_mem_wen;
     logic        csr_sfu_start;
+    logic        csr_sfu_any_start;
+    logic        sfu_tile_start;
+    logic        sfu_tile_busy;
+    logic        sfu_tile_done;
+    logic        sfu_tile_req;
+    logic [15:0] sfu_tile_addr;
+    logic [31:0] sfu_tile_wdata;
+    logic        sfu_tile_wen;
+    logic        sfu_tile_valid_in;
+    logic [7:0]  sfu_tile_opcode;
+    logic [7:0]  sfu_tile_x_in;
+    logic [7:0]  sfu_tile_zp;
+    logic [15:0] sfu_tile_scale_mul;
+    logic [7:0]  sfu_tile_scale_shr;
     logic        sfu_issue_valid;
 
-    assign csr_sfu_start = csr_start && (csr_issue_opcode == `OP_ACT_RELU) &&
-                           (pp_gemm_p_ready || pp_sfu_in_ready);
+    assign csr_sfu_any_start = csr_start &&
+                               ((csr_issue_opcode == `OP_ACT_RELU) ||
+                                (csr_issue_opcode == `OP_ACT_RELU6) ||
+                                (csr_issue_opcode == `OP_ACT_CLIP) ||
+                                (csr_issue_opcode == `OP_ACT_GELU) ||
+                                (csr_issue_opcode == `OP_ACT_SIGMOID) ||
+                                (csr_issue_opcode == `OP_ACT_TANH) ||
+                                (csr_issue_opcode == `OP_QUANT) ||
+                                (csr_issue_opcode == `OP_DEQUANT));
+    assign csr_sfu_start = csr_sfu_any_start && (pp_gemm_p_ready || pp_sfu_in_ready);
     assign sfu_issue_valid = sfu_cmd_valid || csr_sfu_start;
-    assign sfu_opcode = csr_sfu_start ? `OP_ACT_RELU : sfu_cmd[31:24];
-    assign sfu_x_in   = sfu_cmd[7:0];
-    assign sfu_mem_relu_start = csr_sfu_start;
-    assign sfu_valid_in_gated = sfu_issue_valid && !sfu_mem_relu_start;
+    assign sfu_tile_start = csr_sfu_any_start && !pp_gemm_p_ready && pp_sfu_in_ready;
+    assign sfu_opcode = sfu_tile_valid_in ? sfu_tile_opcode :
+                        (csr_sfu_start ? csr_issue_opcode : sfu_cmd[31:24]);
+    assign sfu_x_in   = sfu_tile_valid_in ? sfu_tile_x_in : sfu_cmd[7:0];
+    assign sfu_mem_relu_start = csr_sfu_any_start &&
+                                (csr_issue_opcode == `OP_ACT_RELU) &&
+                                pp_gemm_p_ready;
+    assign sfu_valid_in_gated = sfu_tile_valid_in ||
+                                (sfu_issue_valid && !sfu_mem_relu_start &&
+                                 !sfu_tile_start);
 
     sfu_top u_sfu (
         .clk,
         .rst_n       (dp_rst_n),
         .opcode      (sfu_opcode),
         .x_in        (sfu_x_in),
-        .zp          (8'd0),
-        .scale_mul   (16'd1),
-        .scale_shr   (8'd0),
+        .zp          (sfu_tile_valid_in ? sfu_tile_zp : 8'd0),
+        .scale_mul   (sfu_tile_valid_in ? sfu_tile_scale_mul : 16'd1),
+        .scale_shr   (sfu_tile_valid_in ? sfu_tile_scale_shr : 8'd0),
         .valid_in    (sfu_valid_in_gated),
         .y_out       (sfu_y_out),
         .valid_out   (sfu_valid_out)
@@ -386,7 +414,7 @@ module npu_top #(
         else
             sfu_pipe <= {sfu_pipe[2:0], sfu_valid_in_gated};
     end
-    assign sfu_busy = |sfu_pipe || sfu_mem_relu_active;
+    assign sfu_busy = |sfu_pipe || sfu_mem_relu_active || sfu_tile_busy;
 
     // ================================================================
     // DMA — Direct Memory Access
@@ -1581,13 +1609,212 @@ module npu_top #(
                              relu8(xbar_m2_rdata[7:0])};
     assign sfu_mem_wen   = (sfu_mem_state == SFU_MEM_WRITE);
 
-    assign m2_req   = gemm_wb_active || sfu_mem_req || valu_mem_req;
+    // ================================================================
+    // SFU descriptor-driven SRAM tile path
+    // ================================================================
+    typedef enum logic [3:0] {
+        SFU_TILE_IDLE   = 4'd0,
+        SFU_TILE_DESC0  = 4'd1,
+        SFU_TILE_DESC1  = 4'd2,
+        SFU_TILE_DESC2  = 4'd3,
+        SFU_TILE_DESC3  = 4'd4,
+        SFU_TILE_DESC0W = 4'd5,
+        SFU_TILE_DESC1W = 4'd6,
+        SFU_TILE_DESC2W = 4'd7,
+        SFU_TILE_DESC3W = 4'd8,
+        SFU_TILE_READ   = 4'd9,
+        SFU_TILE_WAIT_R = 4'd10,
+        SFU_TILE_ISSUE  = 4'd11,
+        SFU_TILE_WAIT_Y = 4'd12,
+        SFU_TILE_WRITE  = 4'd13
+    } sfu_tile_state_t;
+
+    sfu_tile_state_t sfu_tile_state, sfu_tile_next;
+    logic [15:0] sfu_tile_desc_ptr;
+    logic [15:0] sfu_tile_len;
+    logic [15:0] sfu_tile_in_base;
+    logic [15:0] sfu_tile_out_base;
+    logic [15:0] sfu_tile_cnt;
+    logic [31:0] sfu_tile_in_word;
+    logic [31:0] sfu_tile_out_word;
+    logic [1:0]  sfu_tile_byte_idx;
+
+    function automatic logic [15:0] sfu_tile_read_addr(input logic [15:0] base,
+                                                       input logic [15:0] cnt);
+        logic [15:0] off;
+        begin
+            off = {4'd0, base[11:0]};
+            if ((base[15:12] == 4'h2) &&
+                (off >= PP_SFU_IN_BASE_OFFSET) &&
+                (off < PP_SFU_OUT_BASE_OFFSET))
+                sfu_tile_read_addr = base + sfu_in_active_offset + cnt;
+            else
+                sfu_tile_read_addr = base + cnt;
+        end
+    endfunction
+
+    function automatic logic [15:0] sfu_tile_write_addr(input logic [15:0] base,
+                                                        input logic [15:0] cnt);
+        logic [15:0] off;
+        begin
+            off = {4'd0, base[11:0]};
+            if ((base[15:12] == 4'h2) &&
+                (off >= PP_SFU_OUT_BASE_OFFSET) &&
+                (off < (PP_SFU_OUT_BASE_OFFSET + (`PP_SFU_SIZE * 2))))
+                sfu_tile_write_addr = base + sfu_out_fill_offset + cnt;
+            else
+                sfu_tile_write_addr = base + cnt;
+        end
+    endfunction
+
+    always_comb begin
+        unique case (sfu_tile_byte_idx)
+            2'd0: sfu_tile_x_in = sfu_tile_in_word[7:0];
+            2'd1: sfu_tile_x_in = sfu_tile_in_word[15:8];
+            2'd2: sfu_tile_x_in = sfu_tile_in_word[23:16];
+            default: sfu_tile_x_in = sfu_tile_in_word[31:24];
+        endcase
+    end
+
+    always_ff @(posedge clk or negedge dp_rst_n) begin
+        if (!dp_rst_n) begin
+            sfu_tile_state     <= SFU_TILE_IDLE;
+            sfu_tile_desc_ptr  <= `DSRAM_BASE;
+            sfu_tile_len       <= `PP_SFU_SIZE;
+            sfu_tile_opcode    <= `OP_ACT_RELU;
+            sfu_tile_zp        <= 8'd0;
+            sfu_tile_scale_mul <= 16'd1;
+            sfu_tile_scale_shr <= 8'd0;
+            sfu_tile_in_base   <= `OSRAM_BASE + PP_SFU_IN_BASE_OFFSET;
+            sfu_tile_out_base  <= `OSRAM_BASE + PP_SFU_OUT_BASE_OFFSET;
+            sfu_tile_cnt       <= 16'd0;
+            sfu_tile_in_word   <= 32'd0;
+            sfu_tile_out_word  <= 32'd0;
+            sfu_tile_byte_idx  <= 2'd0;
+        end else begin
+            sfu_tile_state <= sfu_tile_next;
+            case (sfu_tile_state)
+                SFU_TILE_IDLE: begin
+                    sfu_tile_cnt <= 16'd0;
+                    if (sfu_tile_start) begin
+                        sfu_tile_desc_ptr  <= csr_desc_ptr[15:0];
+                        sfu_tile_len       <= `PP_SFU_SIZE;
+                        sfu_tile_opcode    <= csr_issue_opcode;
+                        sfu_tile_zp        <= 8'd0;
+                        sfu_tile_scale_mul <= 16'd1;
+                        sfu_tile_scale_shr <= 8'd0;
+                        sfu_tile_in_base   <= `OSRAM_BASE + PP_SFU_IN_BASE_OFFSET;
+                        sfu_tile_out_base  <= `OSRAM_BASE + PP_SFU_OUT_BASE_OFFSET;
+                    end
+                end
+                SFU_TILE_DESC0W: begin
+                    sfu_tile_len    <= (xbar_m2_rdata[15:0] == 16'd0)
+                                     ? `PP_SFU_SIZE : xbar_m2_rdata[15:0];
+                    sfu_tile_opcode <= xbar_m2_rdata[23:16];
+                    sfu_tile_zp     <= xbar_m2_rdata[31:24];
+                end
+                SFU_TILE_DESC1W: sfu_tile_in_base <= xbar_m2_rdata[15:0];
+                SFU_TILE_DESC2W: sfu_tile_out_base <= xbar_m2_rdata[15:0];
+                SFU_TILE_DESC3W: begin
+                    sfu_tile_scale_mul <= xbar_m2_rdata[15:0];
+                    sfu_tile_scale_shr <= xbar_m2_rdata[23:16];
+                end
+                SFU_TILE_WAIT_R: begin
+                    sfu_tile_in_word  <= xbar_m2_rdata;
+                    sfu_tile_out_word <= 32'd0;
+                    sfu_tile_byte_idx <= 2'd0;
+                end
+                SFU_TILE_WAIT_Y: begin
+                    if (sfu_valid_out) begin
+                        unique case (sfu_tile_byte_idx)
+                            2'd0: sfu_tile_out_word[7:0]   <= sfu_y_out;
+                            2'd1: sfu_tile_out_word[15:8]  <= sfu_y_out;
+                            2'd2: sfu_tile_out_word[23:16] <= sfu_y_out;
+                            default: sfu_tile_out_word[31:24] <= sfu_y_out;
+                        endcase
+                        if (sfu_tile_byte_idx != 2'd3)
+                            sfu_tile_byte_idx <= sfu_tile_byte_idx + 2'd1;
+                    end
+                end
+                SFU_TILE_WRITE: begin
+                    if (xbar_m2_grant) begin
+                        if (sfu_tile_cnt + 16'd4 < sfu_tile_len)
+                            sfu_tile_cnt <= sfu_tile_cnt + 16'd4;
+                    end
+                end
+                default: begin
+                end
+            endcase
+        end
+    end
+
+    always_comb begin
+        sfu_tile_next = sfu_tile_state;
+        case (sfu_tile_state)
+            SFU_TILE_IDLE:   if (sfu_tile_start)  sfu_tile_next = SFU_TILE_DESC0;
+            SFU_TILE_DESC0:  if (xbar_m2_grant)   sfu_tile_next = SFU_TILE_DESC0W;
+            SFU_TILE_DESC0W:                       sfu_tile_next = SFU_TILE_DESC1;
+            SFU_TILE_DESC1:  if (xbar_m2_grant)   sfu_tile_next = SFU_TILE_DESC1W;
+            SFU_TILE_DESC1W:                       sfu_tile_next = SFU_TILE_DESC2;
+            SFU_TILE_DESC2:  if (xbar_m2_grant)   sfu_tile_next = SFU_TILE_DESC2W;
+            SFU_TILE_DESC2W:                       sfu_tile_next = SFU_TILE_DESC3;
+            SFU_TILE_DESC3:  if (xbar_m2_grant)   sfu_tile_next = SFU_TILE_DESC3W;
+            SFU_TILE_DESC3W:                       sfu_tile_next = SFU_TILE_READ;
+            SFU_TILE_READ:   if (xbar_m2_grant)   sfu_tile_next = SFU_TILE_WAIT_R;
+            SFU_TILE_WAIT_R:                       sfu_tile_next = SFU_TILE_ISSUE;
+            SFU_TILE_ISSUE:                        sfu_tile_next = SFU_TILE_WAIT_Y;
+            SFU_TILE_WAIT_Y: if (sfu_valid_out) begin
+                                 if (sfu_tile_byte_idx == 2'd3)
+                                     sfu_tile_next = SFU_TILE_WRITE;
+                                 else
+                                     sfu_tile_next = SFU_TILE_ISSUE;
+                             end
+            SFU_TILE_WRITE:  if (xbar_m2_grant) begin
+                                 if (sfu_tile_cnt + 16'd4 >= sfu_tile_len)
+                                     sfu_tile_next = SFU_TILE_IDLE;
+                                 else
+                                     sfu_tile_next = SFU_TILE_READ;
+                             end
+            default: sfu_tile_next = SFU_TILE_IDLE;
+        endcase
+    end
+
+    assign sfu_tile_busy = (sfu_tile_state != SFU_TILE_IDLE);
+    assign sfu_tile_done = (sfu_tile_state == SFU_TILE_WRITE) &&
+                           xbar_m2_grant &&
+                           (sfu_tile_cnt + 16'd4 >= sfu_tile_len);
+    assign sfu_tile_req  = (sfu_tile_state == SFU_TILE_DESC0) ||
+                           (sfu_tile_state == SFU_TILE_DESC1) ||
+                           (sfu_tile_state == SFU_TILE_DESC2) ||
+                           (sfu_tile_state == SFU_TILE_DESC3) ||
+                           (sfu_tile_state == SFU_TILE_READ)  ||
+                           (sfu_tile_state == SFU_TILE_WRITE);
+    always_comb begin
+        sfu_tile_addr = 16'd0;
+        unique case (sfu_tile_state)
+            SFU_TILE_DESC0: sfu_tile_addr = sfu_tile_desc_ptr;
+            SFU_TILE_DESC1: sfu_tile_addr = sfu_tile_desc_ptr + 16'd4;
+            SFU_TILE_DESC2: sfu_tile_addr = sfu_tile_desc_ptr + 16'd8;
+            SFU_TILE_DESC3: sfu_tile_addr = sfu_tile_desc_ptr + 16'd12;
+            SFU_TILE_READ:  sfu_tile_addr = sfu_tile_read_addr(sfu_tile_in_base, sfu_tile_cnt);
+            SFU_TILE_WRITE: sfu_tile_addr = sfu_tile_write_addr(sfu_tile_out_base, sfu_tile_cnt);
+            default:        sfu_tile_addr = 16'd0;
+        endcase
+    end
+    assign sfu_tile_wdata    = sfu_tile_out_word;
+    assign sfu_tile_wen      = (sfu_tile_state == SFU_TILE_WRITE);
+    assign sfu_tile_valid_in = (sfu_tile_state == SFU_TILE_ISSUE);
+
+    assign m2_req   = gemm_wb_active || sfu_mem_req || sfu_tile_req || valu_mem_req;
     assign m2_addr  = gemm_wb_active ? gemm_wb_addr  :
-                      sfu_mem_req    ? sfu_mem_addr  : valu_mem_addr;
+                      sfu_mem_req    ? sfu_mem_addr  :
+                      sfu_tile_req   ? sfu_tile_addr : valu_mem_addr;
     assign m2_wdata = gemm_wb_active ? gemm_wb_wdata :
-                      sfu_mem_req    ? sfu_mem_wdata : valu_mem_wdata;
+                      sfu_mem_req    ? sfu_mem_wdata :
+                      sfu_tile_req   ? sfu_tile_wdata : valu_mem_wdata;
     assign m2_wen   = gemm_wb_active ? 1'b1          :
-                      sfu_mem_req    ? sfu_mem_wen   : valu_mem_wen;
+                      sfu_mem_req    ? sfu_mem_wen   :
+                      sfu_tile_req   ? sfu_tile_wen  : valu_mem_wen;
 
     // ================================================================
     // Ping-pong buffer controllers
@@ -1675,8 +1902,8 @@ module npu_top #(
     assign pp_valu_out_fill  = valu_mem_done;
     assign pp_valu_out_consume= prefill_done && dma_target_valu_out;
     assign pp_sfu_in_fill    = dma_bridge_copy_done && dma_target_sfu_in;
-    assign pp_sfu_in_consume = sfu_mem_relu_finish && !sfu_mem_is_p;
-    assign pp_sfu_out_fill   = sfu_mem_relu_finish && !sfu_mem_is_p;
+    assign pp_sfu_in_consume = sfu_tile_done;
+    assign pp_sfu_out_fill   = sfu_tile_done;
     assign pp_sfu_out_consume= prefill_done && dma_target_sfu_out;
 
     // ================================================================
@@ -1708,7 +1935,8 @@ module npu_top #(
 
     assign npu_going_idle = (valu_busy && valu_done)  ||
                             (dma_busy  && dma_done)   ||
-                            (sfu_busy  && (sfu_valid_out || sfu_mem_relu_done)) ||
+                            (sfu_busy  && (sfu_valid_out || sfu_mem_relu_done ||
+                                           sfu_tile_done)) ||
                             (bridge_busy && dma_br_next == DMA_BR_IDLE) ||
                             (gemm_wb_active && xbar_m2_grant && gemm_wb_cnt == 7'd127);
 
