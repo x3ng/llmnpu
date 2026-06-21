@@ -36,6 +36,10 @@
 `define VOPT_AND  8'h05
 `define VOPT_OR   8'h06
 `define VOPT_XOR  8'h07
+`define VOPT_SLL  8'h08
+`define VOPT_SRA  8'h09
+`define VOPT_CMOV 8'h0A
+`define VOPT_BCAST 8'h80
 
 // --- GEMM Descriptor (152 bits = 19 bytes, packed struct) ---
 // GEMM IF/ID instruction descriptor reference:

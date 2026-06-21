@@ -32,22 +32,29 @@ def to_s8(x):
 
 
 def expected_op(opt, a, b):
-    if opt == 0:
+    base_opt = opt & 0x0F
+    if base_opt == 0:
         return (to_s8(a) + to_s8(b)) & 0xFF
-    if opt == 1:
+    if base_opt == 1:
         return (to_s8(a) - to_s8(b)) & 0xFF
-    if opt == 2:
+    if base_opt == 2:
         return (to_s8(a) * to_s8(b)) & 0xFF
-    if opt == 3:
+    if base_opt == 3:
         return a if to_s8(a) < to_s8(b) else b
-    if opt == 4:
+    if base_opt == 4:
         return a if to_s8(a) > to_s8(b) else b
-    if opt == 5:
+    if base_opt == 5:
         return a & b
-    if opt == 6:
+    if base_opt == 6:
         return a | b
-    if opt == 7:
+    if base_opt == 7:
         return a ^ b
+    if base_opt == 8:
+        return (a << (b & 0x7)) & 0xFF
+    if base_opt == 9:
+        return (to_s8(a) >> (b & 0x7)) & 0xFF
+    if base_opt == 10:
+        return b if (a & 0xFF) != 0 else 0
     raise ValueError(opt)
 
 
@@ -219,16 +226,31 @@ async def test_valu_vadd(dut):
 
 @cocotb.test()
 async def test_valu_all_defined_opts(dut):
-    """Verify ADD/SUB/MUL/MIN/MAX/AND/OR/XOR for all 64 lanes."""
+    """Verify all defined VALU operations for all 64 lanes."""
     await reset_valu(dut)
 
     vec_a = [((i * 17 + 0x83) & 0xFF) for i in range(64)]
     vec_b = [((i * 29 + 0x35) & 0xFF) for i in range(64)]
+    vec_a[0] = 0
+    vec_a[1] = 1
+    vec_b = [(v & 0x07) if i % 5 == 0 else v for i, v in enumerate(vec_b)]
     await write_vec(dut, 0, vec_a)
     await write_vec(dut, 1, vec_b)
 
-    names = ["ADD", "SUB", "MUL", "MIN", "MAX", "AND", "OR", "XOR"]
-    for opt, name in enumerate(names):
+    ops = [
+        (0x00, "ADD"),
+        (0x01, "SUB"),
+        (0x02, "MUL"),
+        (0x03, "MIN"),
+        (0x04, "MAX"),
+        (0x05, "AND"),
+        (0x06, "OR"),
+        (0x07, "XOR"),
+        (0x08, "SLL"),
+        (0x09, "SRA"),
+        (0x0A, "CMOV"),
+    ]
+    for opt, name in ops:
         rd = 2 + opt
         await issue_valu(dut, opt, rd=rd)
         result = await read_vec(dut, rd)
@@ -243,3 +265,29 @@ async def test_valu_all_defined_opts(dut):
         )
 
     dut._log.info("PASS: VALU all defined VOPT operations match expected values")
+
+
+@cocotb.test()
+async def test_valu_broadcast_rs2_lane0(dut):
+    """VALU broadcast mode uses rs2 lane0 for every lane."""
+    await reset_valu(dut)
+
+    vec_a = [((i * 11 + 3) & 0xFF) for i in range(64)]
+    vec_b = [0x05] + [((i * 7 + 0x40) & 0xFF) for i in range(1, 64)]
+    await write_vec(dut, 0, vec_a)
+    await write_vec(dut, 1, vec_b)
+
+    opt = 0x80 | 0x00  # broadcast + ADD
+    await issue_valu(dut, opt, rd=2)
+    result = await read_vec(dut, 2)
+    expected = [expected_op(opt, a, vec_b[0]) for a in vec_a]
+    mismatches = [
+        (i, result[i], expected[i])
+        for i in range(64)
+        if result[i] != expected[i]
+    ]
+    assert not mismatches, (
+        f"VALU broadcast ADD mismatches: {mismatches[:8]} total={len(mismatches)}"
+    )
+
+    dut._log.info("PASS: VALU broadcast uses rs2 lane0 across all lanes")

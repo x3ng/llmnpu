@@ -132,10 +132,11 @@ module valu_top (
     // ------------------------------------------------------------------
     generate
         for (genvar i = 0; i < `VALU_LANES; i++) begin : lanes
+            wire [7:0] lane_b = opt_q[7] ? rs2_data_q[0] : rs2_data_q[i];
             valu_lane u_lane (
-                .op    (opt_q[2:0]),
+                .op    (opt_q),
                 .a     (rs1_data_q[i]),
-                .b     (rs2_data_q[i]),
+                .b     (lane_b),
                 .result(lane_results[i])
             );
         end
