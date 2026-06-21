@@ -26,6 +26,89 @@ def int8_add(a, b):
     return ((a + b) & 0xFF)
 
 
+def to_s8(x):
+    x &= 0xFF
+    return x - 256 if x & 0x80 else x
+
+
+def expected_op(opt, a, b):
+    if opt == 0:
+        return (to_s8(a) + to_s8(b)) & 0xFF
+    if opt == 1:
+        return (to_s8(a) - to_s8(b)) & 0xFF
+    if opt == 2:
+        return (to_s8(a) * to_s8(b)) & 0xFF
+    if opt == 3:
+        return a if to_s8(a) < to_s8(b) else b
+    if opt == 4:
+        return a if to_s8(a) > to_s8(b) else b
+    if opt == 5:
+        return a & b
+    if opt == 6:
+        return a | b
+    if opt == 7:
+        return a ^ b
+    raise ValueError(opt)
+
+
+async def reset_valu(dut):
+    clock = Clock(dut.clk, 10, unit="ns")
+    cocotb.start_soon(clock.start())
+
+    dut.rst_n.value = 0
+    dut.test_wen.value = 0
+    dut.test_waddr.value = 0
+    dut.test_raddr.value = 0
+    dut.cmd_valid.value = 0
+    dut.opcode.value = 0
+    dut.opt.value = 0
+    dut.rs1.value = 0
+    dut.rs2.value = 0
+    dut.rd.value = 0
+
+    await RisingEdge(dut.clk)
+    await RisingEdge(dut.clk)
+    dut.rst_n.value = 1
+    await RisingEdge(dut.clk)
+    await RisingEdge(dut.clk)
+
+
+async def write_vec(dut, reg_idx, values):
+    dut.test_wen.value = 1
+    dut.test_waddr.value = reg_idx
+    dut.test_wdata.value = pack_bytes(values)
+    await RisingEdge(dut.clk)
+    dut.test_wen.value = 0
+    await RisingEdge(dut.clk)
+
+
+async def read_vec(dut, reg_idx):
+    dut.test_raddr.value = reg_idx
+    await Timer(1, unit="ns")
+    return unpack_bytes(dut.test_rdata.value)
+
+
+async def issue_valu(dut, opt, rd=2, rs1=0, rs2=1):
+    await RisingEdge(dut.clk)
+    dut.cmd_valid.value = 1
+    dut.opcode.value = 0x10
+    dut.opt.value = opt
+    dut.rs1.value = rs1
+    dut.rs2.value = rs2
+    dut.rd.value = rd
+    await RisingEdge(dut.clk)
+    dut.cmd_valid.value = 0
+
+    done_seen = False
+    for _ in range(20):
+        await RisingEdge(dut.clk)
+        if not done_seen and dut.done.value:
+            done_seen = True
+        if done_seen and not dut.done.value and not dut.busy.value:
+            return
+    assert False, f"VALU FSM timeout for opt={opt}"
+
+
 @cocotb.test()
 async def test_valu_vadd(dut):
     """VADD: add two random 64-element INT8 vectors, verify each lane."""
@@ -132,3 +215,31 @@ async def test_valu_vadd(dut):
 
     dut._log.info(f"VADD OK — all 64 lanes match expected (sample a[0]=0x{vec_a[0]:02x}, b[0]=0x{vec_b[0]:02x}, r[0]=0x{result_bytes[0]:02x})")
     dut._log.info("TASK 1.3 COMPLETE: VALU 64-lane SIMD verified")
+
+
+@cocotb.test()
+async def test_valu_all_defined_opts(dut):
+    """Verify ADD/SUB/MUL/MIN/MAX/AND/OR/XOR for all 64 lanes."""
+    await reset_valu(dut)
+
+    vec_a = [((i * 17 + 0x83) & 0xFF) for i in range(64)]
+    vec_b = [((i * 29 + 0x35) & 0xFF) for i in range(64)]
+    await write_vec(dut, 0, vec_a)
+    await write_vec(dut, 1, vec_b)
+
+    names = ["ADD", "SUB", "MUL", "MIN", "MAX", "AND", "OR", "XOR"]
+    for opt, name in enumerate(names):
+        rd = 2 + opt
+        await issue_valu(dut, opt, rd=rd)
+        result = await read_vec(dut, rd)
+        expected = [expected_op(opt, a, b) for a, b in zip(vec_a, vec_b)]
+        mismatches = [
+            (i, result[i], expected[i])
+            for i in range(64)
+            if result[i] != expected[i]
+        ]
+        assert not mismatches, (
+            f"VALU {name} mismatches: {mismatches[:8]} total={len(mismatches)}"
+        )
+
+    dut._log.info("PASS: VALU all defined VOPT operations match expected values")
