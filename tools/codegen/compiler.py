@@ -22,6 +22,7 @@ from .serialize import (
     NpuInstruction,
     Opcode,
     VOpt,
+    GEMM_DESCRIPTOR_SIZE,
     build_gemm_descriptor,
 )
 
@@ -30,6 +31,9 @@ TILE_DIM = 16
 
 def _ceil_div(a: int, b: int) -> int:
     return (a + b - 1) // b
+
+
+GEMM_DESCRIPTOR_WORDS = (GEMM_DESCRIPTOR_SIZE + 3) // 4
 
 
 class NpuCompiler:
@@ -52,7 +56,7 @@ class NpuCompiler:
                 sub = model.get_submodule(node.target)
                 if isinstance(sub, nn.Linear):
                     instr, desc = self._lower_linear(sub)
-                    instr.desc_ptr = len(descriptors)
+                    instr.desc_ptr = len(descriptors) * GEMM_DESCRIPTOR_WORDS
                     descriptors.append(desc)
                     instructions.append(instr)
 

@@ -123,15 +123,26 @@ class TestSerialize:
         assert VOpt.ADD == 0x00
         assert VOpt.MUL == 0x02
 
-    # -- R-type encoding --------------------------------------------------
-    def test_encode_rtype(self):
+    # -- Instruction encoding --------------------------------------------
+    def test_encode_gemm_descriptor_ref(self):
         instr = NpuInstruction(
-            opcode=Opcode.GEMM, dst=1, src_a=2, src_b=3, is_itype=False,
+            opcode=Opcode.GEMM, desc_ptr=5, src_b=16, is_itype=False,
         )
         data = instr.encode()
         assert len(data) == 4
         word = struct.unpack("<I", data)[0]
         assert (word >> 24) & 0xFF == Opcode.GEMM
+        assert (word >> 8) & 0xFFFF == 5
+        assert word & 0xFF == 16
+
+    def test_encode_rtype(self):
+        instr = NpuInstruction(
+            opcode=Opcode.ACT_RELU, dst=1, src_a=2, src_b=3, is_itype=False,
+        )
+        data = instr.encode()
+        assert len(data) == 4
+        word = struct.unpack("<I", data)[0]
+        assert (word >> 24) & 0xFF == Opcode.ACT_RELU
         assert (word >> 16) & 0xFF == 1
         assert (word >> 8) & 0xFF == 2
         assert word & 0xFF == 3

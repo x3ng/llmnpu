@@ -77,6 +77,12 @@ class NpuInstruction:
         [15:8]   SRC_A source A
         [7:0]    SRC_B source B
 
+    **GEMM descriptor-ref** (``opcode`` is GEMM/GEMM_SCALE)::
+
+        [31:24]  OP
+        [23:8]   descriptor word offset from CSR_DESC_PTR
+        [7:0]    auxiliary / legacy K-count field
+
     **I-type** (``is_itype=True``)::
 
         [31:28]  OP[3:0]  lower nibble of opcode
@@ -101,6 +107,12 @@ class NpuInstruction:
                 ((self.opcode & 0xF) << 28)
                 | ((self.opt & 0xFF) << 20)
                 | (self.imm & 0xFFFFF)
+            )
+        elif self.opcode in (Opcode.GEMM, Opcode.GEMM_SCALE):
+            word = (
+                ((self.opcode & 0xFF) << 24)
+                | ((self.desc_ptr & 0xFFFF) << 8)
+                | (self.src_b & 0xFF)
             )
         else:
             word = (

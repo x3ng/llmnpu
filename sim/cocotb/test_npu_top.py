@@ -289,6 +289,60 @@ async def test_csr_gemm_fetches_descriptor(dut):
 
 
 @cocotb.test()
+async def test_ifid_gemm_uses_descriptor_ref(dut):
+    """IF/ID GEMM instruction fetches GemmDesc at CSR_DESC_PTR + desc_ref."""
+    await setup_dut(dut)
+
+    dut.rst_n.value = 1
+    await RisingEdge(dut.clk)
+    await Timer(1, unit="ps")
+
+    await csr_write(dut, CSR_CTRL, 0x00000002)
+
+    # Base descriptor is K=1; the instruction references the second
+    # descriptor at +5 words, which is K=2.  This catches using the CSR base
+    # directly instead of the instruction descriptor reference.
+    dsram_write_word(dut, DSRAM_BASE + 0, 0x00010001)
+    dsram_write_word(dut, DSRAM_BASE + 4, 0x01000001)
+    dsram_write_word(dut, DSRAM_BASE + 8, 0x00000002)
+    dsram_write_word(dut, DSRAM_BASE + 12, 0x00000000)
+    dsram_write_word(dut, DSRAM_BASE + 16, 0x00000000)
+
+    desc_ref_words = 5
+    desc_addr = DSRAM_BASE + desc_ref_words * 4
+    dsram_write_word(dut, desc_addr + 0, 0x00010001)
+    dsram_write_word(dut, desc_addr + 4, 0x01000002)
+    dsram_write_word(dut, desc_addr + 8, 0x00000002)
+    dsram_write_word(dut, desc_addr + 12, 0x00000000)
+    dsram_write_word(dut, desc_addr + 16, 0x00000000)
+
+    await if_load(dut, 0, (OP_GEMM << 24) | (desc_ref_words << 8))
+    await if_load(dut, 1, 0xFF000000)
+    await Timer(1, unit="ps")
+
+    await csr_write(dut, CSR_DESC_PTR, DSRAM_BASE)
+    await csr_write(dut, CSR_CTRL, 0x00000000)
+
+    entered_preload = False
+    for _ in range(60):
+        await RisingEdge(dut.clk)
+        await Timer(1, unit="ps")
+        state = int(dut.gpl_state.value)
+        if state in (1, 2, 3, 4, 5):
+            entered_preload = True
+            break
+
+    assert entered_preload, "IF/ID GEMM did not enter descriptor preload"
+    assert int(dut.gpl_desc_ptr_latched.value) == desc_addr
+    assert int(dut.gpl_k_count.value) == 32, (
+        f"IF/ID desc_ref did not select K=2 descriptor: "
+        f"k_count={int(dut.gpl_k_count.value)} "
+        f"latched=0x{int(dut.gpl_desc_ptr_latched.value):04X}"
+    )
+    dut._log.info("PASS: IF/ID GEMM descriptor reference selects K=2 descriptor")
+
+
+@cocotb.test()
 async def test_csr_gemm_k2_computes_from_descriptor(dut):
     """CSR GEMM with descriptor K=2 tiles applies zp, scale, and ReLU."""
     await setup_dut(dut)

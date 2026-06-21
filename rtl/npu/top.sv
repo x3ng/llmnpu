@@ -187,10 +187,20 @@ module npu_top #(
     logic        gpl_gemm_start;
     logic        gpl_feeding;
     logic        csr_gemm_start;
+    logic        if_gemm_desc_start;
+    logic        gemm_issue_desc_fetch;
+    logic [15:0] gemm_issue_desc_ptr;
 
     assign csr_gemm_start   = csr_start && (csr_issue_opcode == `OP_GEMM);
+    assign if_gemm_desc_start = gemm_cmd_valid &&
+                                ((gemm_cmd[31:24] == `OP_GEMM_SCALE) ||
+                                 (gemm_cmd[23:8] != 16'd0));
     assign gemm_issue_valid = gemm_cmd_valid || csr_gemm_start;
     assign gemm_issue_cmd   = csr_gemm_start ? {`OP_GEMM, 16'd0, 8'd16} : gemm_cmd;
+    assign gemm_issue_desc_fetch = csr_gemm_start || if_gemm_desc_start;
+    assign gemm_issue_desc_ptr = csr_gemm_start
+                               ? csr_desc_ptr[15:0]
+                               : (csr_desc_ptr[15:0] + {gemm_cmd[21:8], 2'b00});
     assign gemm_start       = gpl_gemm_start;
 
     always_ff @(posedge clk or negedge dp_rst_n) begin
@@ -740,7 +750,7 @@ module npu_top #(
                     gpl_feed_k <= 8'd0;
                     gpl_feed_phase <= 2'd0;
                     if (gemm_issue_valid) begin
-                        gpl_desc_ptr_latched <= csr_desc_ptr[15:0];
+                        gpl_desc_ptr_latched <= gemm_issue_desc_ptr;
                         gpl_a_base           <= `ASRAM_BASE;
                         gpl_b_base           <= `WSRAM_BASE;
                         gpl_o_base           <= `OSRAM_BASE;
@@ -821,7 +831,7 @@ module npu_top #(
         gpl_next = gpl_state;
         case (gpl_state)
             GPL_IDLE:    if (gemm_issue_valid) begin
-                              if (csr_gemm_start)
+                              if (gemm_issue_desc_fetch)
                                   gpl_next = GPL_DESC0;
                               else
                                   gpl_next = GPL_LOAD_B0;
