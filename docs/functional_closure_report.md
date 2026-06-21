@@ -153,10 +153,21 @@ printing the all-pass cocotb summary. No cocotb assertion failed.
 environment. The equivalent codegen smoke above was run with the actual
 `torch` import and `.npu` binary generation path.
 
-The legacy `make test_e2e` target now links driver/runtime objects, but the
-old firmware reports UART `A`, which maps to its initial ISRAM direct-access
-probe. That target is not used as the generated-program closure test; the
-generated `.npu` RTL path is covered by `make test_e2e_program`.
+```bash
+nix develop --command bash -lc \
+  'cd sim && make test_e2e 2>&1 | rg -e "--prefix|verilator|Vtop|vvp|Makefile.icarus|PASS|FAIL|ERROR|AssertionError|TESTS=|UART|timeout|Timeout|stage|ISRAM|VSRAM|ExtMem|GEMM|ReLU|undefined reference"'
+```
+
+Result:
+
+```text
+Running on Verilator version 5.048
+UART_TX[0] = 0x50 ('P')
+PASS: E2E pass - UART_TX = 'P'
+UART_TX[0] = 0x45 ('E')
+PASS: E2E fail-detect - UART_TX = 'E'
+TESTS=2 PASS=2 FAIL=0 SKIP=0
+```
 
 ## Functional Limitations
 

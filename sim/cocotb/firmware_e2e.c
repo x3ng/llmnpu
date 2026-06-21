@@ -12,6 +12,7 @@
 // ============================================================
 
 #include "../../sw/runtime/npu_runtime.h"
+#include "../../sw/driver/npu_csr.h"
 
 // ------------------------------------------------------------
 // Minimal libc stubs (nostdlib)
@@ -166,11 +167,7 @@ void main(void)
 
     // -- Stage 0: ISRAM write/read-back -----------------------------
     {
-        // NOTE: ISRAM decode bug in picorv32_wrapper.sv line 170:
-        // condition checks addr[31:13]==19'h10008 but 0x10010000 has
-        // bits[31:13]==19'h08008.  Work around by using the address
-        // that the buggy decoder actually selects: 0x20010000.
-        volatile uint32_t *isram = (volatile uint32_t *)0x20010000u;
+        volatile uint32_t *isram = (volatile uint32_t *)NPU_ISRAM_BASE;
         isram[0] = 0xDEADBEEFu;
         mem_fence();
         if (isram[0] != 0xDEADBEEFu) { errors++; stage &= ~0x01; }

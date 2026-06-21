@@ -99,8 +99,7 @@ make test_e2e_gemm             # GEMM E2E test (verilator)
 - `pytest` is not installed in the current nix shell; codegen was verified with
   a direct Python smoke that imports `torch`, calls `compile_model()`, and
   checks the `.npu` binary header/opcodes.
-- Legacy `make test_e2e` now links driver/runtime objects but still fails its
-  first ISRAM direct-access probe with UART `A`; generated-program closure is
-  verified by `make test_e2e_program`.
+- `make test_e2e` runs on Verilator and passes the full firmware smoke,
+  including the intentional corrupted-golden fail-detection case.
 - Performance targets remain deferred: DMA outstanding depth 8, true
   compute/DMA overlap, GEMM steady-state throughput, and SFU throughput.

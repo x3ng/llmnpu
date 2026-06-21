@@ -324,6 +324,7 @@ rebuild_e2e_gemm:
 # ── E2E Full SoC Integration ──
 
 test_e2e: SIM_BUILD = sim_build_e2e
+test_e2e: SIM = verilator
 test_e2e:
 	@rm -rf $(SIM_BUILD)
 	@python3 $(REPO_ROOT)/tools/codegen/generate_golden.py --header > $(REPO_ROOT)/build/golden_gemm.h
@@ -355,7 +356,11 @@ test_e2e:
 	PYTHONPATH=$(SIM_DIR)/cocotb:$$PYTHONPATH \
 	MODULE=test_e2e TOPLEVEL=top_soc \
 	VERILOG_SOURCES="$(E2E_RTL)" \
-	$(MAKE) COMPILE_ARGS='$(E2E_COMPILE_ARGS)' \
+	$(MAKE) SIM=verilator \
+		VERILOG_INCLUDE_DIRS='$(E2E_VERILATOR_INCLUDE_DIRS)' \
+		EXTRA_ARGS='$(GEMM_EXTRA_ARGS) $(E2E_VERILATOR_EXTRA_ARGS)' \
+		BUILD_ARGS='$(GEMM_BUILD_ARGS)' \
+		CUSTOM_COMPILE_DEPS='$(SIM_DIR)/Makefile $(E2E_RTL)' \
 		2>&1 | tee $(SIM_BUILD)/test.log
 
 # ── Batch targets ──

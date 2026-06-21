@@ -5,7 +5,7 @@ all bus slaves, NPU CSR, DMA programming, and GEMM/ReLU runtime.
 
 Tests:
   1. test_e2e_pass        — correct firmware → expect UART_TX = 'P'
-  2. test_e2e_fail_detect — corrupted golden → expect UART_TX = 'F'
+  2. test_e2e_fail_detect — corrupted golden → expect a non-'P' stage code
 """
 
 import os
@@ -82,11 +82,11 @@ async def test_e2e_pass(dut):
 
 @cocotb.test()
 async def test_e2e_fail_detection(dut):
-    """Corrupted golden data — expect UART_TX = 'F'.
+    """Corrupted golden data — expect a non-'P' stage code.
 
     After firmware is loaded, we corrupt one of the bus-check
     sentinel values in ext_mem so the firmware detects a mismatch
-    and outputs 'F'.
+    and outputs the first failing stage code.
     """
     await _run_e2e(dut, expect_char='F', corrupt_extmem=True)
 
