@@ -24,6 +24,7 @@ async def setup_reset(dut):
     dut.mem_we.value = 0
     dut.mem_addr.value = 0
     dut.mem_wdata.value = 0
+    dut.instr_base_addr.value = 0
     dut.pc_we.value = 0
     dut.pc_wdata.value = 0
     dut.halt.value = 0
@@ -31,6 +32,8 @@ async def setup_reset(dut):
     dut.valu_busy.value = 0
     dut.sfu_busy.value = 0
     dut.dma_busy.value = 0
+    dut.refill_valid.value = 0
+    dut.refill_data.value = 0
 
     await ClockCycles(dut.clk, 3)
 
@@ -227,6 +230,62 @@ async def test_dispatch_past_four_word_boundary(dut):
         await Timer(1, unit='ns')
 
     dut._log.info("PASS: IF/ID dispatches instruction beyond imem[3]")
+
+
+@cocotb.test()
+async def test_refill_miss_fetches_32_instruction_block(dut):
+    """I-SRAM miss stalls fetch and accepts a 32-word refill block."""
+    await setup_reset(dut)
+
+    base = 0x40001000
+    dut.instr_base_addr.value = base
+    dut.halt.value = 1
+    dut.rst_n.value = 1
+    await Timer(1, unit='ns')
+    await RisingEdge(dut.clk)
+    await Timer(1, unit='ns')
+
+    # Earlier tests in the same cocotb regression may have marked block 0
+    # valid.  Jump to block 1, which this test never preloads, to exercise the
+    # miss/refill path deterministically.
+    dut.pc_we.value = 1
+    dut.pc_wdata.value = 32
+    await RisingEdge(dut.clk)
+    await Timer(1, unit='ns')
+    dut.pc_we.value = 0
+    dut.halt.value = 0
+
+    await RisingEdge(dut.clk)
+    await ReadOnly()
+    expected_addr = base + 128
+    assert int(dut.refill_req.value), "refill_req did not assert on I-SRAM miss"
+    assert int(dut.refill_ext_addr.value) == expected_addr, \
+        f"refill_ext_addr=0x{int(dut.refill_ext_addr.value):08X} != 0x{expected_addr:08X}"
+    assert int(dut.stall_if.value), "IF/ID should stall while refill is pending"
+    assert not int(dut.gemm_cmd_valid.value), \
+        "instruction dispatched before refill completed"
+    await Timer(1, unit='ns')
+
+    dut.refill_valid.value = 1
+    for i in range(32):
+        dut.refill_data.value = 0x01020304 if i == 0 else NOP
+        await RisingEdge(dut.clk)
+        await Timer(1, unit='ns')
+    dut.refill_valid.value = 0
+
+    await RisingEdge(dut.clk)
+    await ReadOnly()
+    assert not int(dut.refill_req.value), "refill_req stayed high after 32 words"
+    assert int(dut.debug_instr.value) == 0x01020304, \
+        f"debug_instr=0x{int(dut.debug_instr.value):08X} != 0x01020304"
+
+    await RisingEdge(dut.clk)
+    await ReadOnly()
+    assert int(dut.gemm_cmd_valid.value), \
+        "refilled GEMM instruction did not dispatch"
+    assert int(dut.gemm_cmd.value) == 0x01020304
+
+    dut._log.info("PASS: I-SRAM miss refills and dispatches block 1")
 
 
 @cocotb.test()

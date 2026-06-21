@@ -4,10 +4,16 @@ module if_id_top (
     input  logic        mem_we,
     input  logic [7:0]  mem_addr,
     input  logic [31:0] mem_wdata,
+    input  logic [31:0] instr_base_addr,
     input  logic        pc_we,
     input  logic [7:0]  pc_wdata,
     input  logic        halt,
     input  logic        gemm_busy, valu_busy, sfu_busy, dma_busy,
+    output logic        refill_req,
+    output logic [31:0] refill_ext_addr,
+    input  logic        refill_valid,
+    input  logic [31:0] refill_data,
+    output logic        refill_busy,
     output logic        gemm_cmd_valid, valu_cmd_valid, sfu_cmd_valid, dma_cmd_valid,
     output logic        illegal_cmd_valid,
     output logic [31:0] gemm_cmd, valu_cmd, sfu_cmd, dma_cmd,
@@ -19,6 +25,8 @@ module if_id_top (
 );
 
     localparam int IMEM_WORDS = 256;
+    localparam int REFILL_WORDS = 32;
+    localparam int REFILL_BLOCKS = IMEM_WORDS / REFILL_WORDS;
 
     reg [31:0] imem [0:IMEM_WORDS-1];
     wire [31:0] imem0 = imem[0];
@@ -29,8 +37,21 @@ module if_id_top (
     reg [31:0] id_instr;
     reg id_valid;
     reg halted;
+    reg [REFILL_BLOCKS-1:0] block_valid;
+    reg refill_active;
+    reg [2:0] refill_block;
+    reg [4:0] refill_idx;
+
+    initial begin
+        block_valid = '0;
+    end
 
     wire [31:0] fetch_instr = imem[pc];
+    wire [2:0] pc_block = pc[7:5];
+    wire pc_block_valid = block_valid[pc_block];
+    wire need_refill = !halted && !halt && !pc_block_valid && !refill_active;
+    wire [2:0] refill_req_block = refill_active ? refill_block : pc_block;
+    wire fetch_ready = pc_block_valid && !refill_active;
 
     wire [7:0]  opcode   = id_instr[31:24];
     wire target_gemm = (opcode == 8'h01) || (opcode == 8'h02);
@@ -52,15 +73,15 @@ module if_id_top (
         (is_sync && (gemm_busy || valu_busy || sfu_busy || dma_busy))
     );
     wire dispatch_wfi = id_valid && is_wfi && !halted;
-    wire stall_w = halted || halt || busy_stall_w;
+    wire stall_w = halted || halt || busy_stall_w || !fetch_ready;
 
-    // Single synchronous always block: imem write first, then reset/pipeline.
+    assign refill_req      = refill_active || need_refill;
+    assign refill_busy     = refill_active;
+    assign refill_ext_addr = instr_base_addr + {22'd0, refill_req_block, 7'd0};
+
+    // Single synchronous always block. I-SRAM writes remain active during
+    // datapath reset so software can preload instructions before START.
     always @(posedge clk) begin
-        // ---- Instruction memory write: always, even during reset ----
-        if (mem_we) begin
-            imem[mem_addr] <= mem_wdata;
-        end
-
         // ---- Synchronous reset / pipeline advance ----
         if (!rst_n) begin
             pc       <= 8'd0;
@@ -68,6 +89,9 @@ module if_id_top (
             id_instr <= 32'd0;
             id_pc    <= 8'd0;
             halted   <= 1'b0;
+            refill_active <= 1'b0;
+            refill_block  <= 3'd0;
+            refill_idx    <= 5'd0;
             stall_if <= 1'b0;
             gemm_cmd_valid <= 1'b0; gemm_cmd <= 32'd0;
             valu_cmd_valid <= 1'b0; valu_cmd <= 32'd0;
@@ -75,6 +99,21 @@ module if_id_top (
             dma_cmd_valid  <= 1'b0; dma_cmd  <= 32'd0;
             illegal_cmd_valid <= 1'b0;
         end else begin
+            if (need_refill) begin
+                refill_active <= 1'b1;
+                refill_block  <= pc_block;
+                refill_idx    <= 5'd0;
+            end else if (refill_active && refill_valid) begin
+                imem[{refill_block, refill_idx}] <= refill_data;
+                if (refill_idx == 5'd31) begin
+                    block_valid[refill_block] <= 1'b1;
+                    refill_active <= 1'b0;
+                    refill_idx    <= 5'd0;
+                end else begin
+                    refill_idx <= refill_idx + 5'd1;
+                end
+            end
+
             if (pc_we) begin
                 pc       <= pc_wdata;
                 id_pc    <= 8'd0;
@@ -114,6 +153,14 @@ module if_id_top (
                     illegal_cmd_valid <= 1'b1;
                 end
             end
+        end
+
+        // ---- Instruction memory write: always, even during reset ----
+        // Debug/CPU writes are treated as authoritative I-SRAM contents and
+        // mark the containing 32-instruction block valid.
+        if (mem_we) begin
+            imem[mem_addr] <= mem_wdata;
+            block_valid[mem_addr[7:5]] <= 1'b1;
         end
     end
 

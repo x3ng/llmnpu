@@ -170,6 +170,9 @@ module npu_top #(
     logic        gemm_issue_valid;
     logic [31:0] gemm_issue_cmd;
     logic [31:0] gemm_issue_cmd_latched;
+    logic        if_refill_req;
+    logic [31:0] if_refill_ext_addr;
+    logic        if_refill_busy;
 
     // ================================================================
     // IF/ID Pipeline
@@ -180,6 +183,7 @@ module npu_top #(
         .mem_we         (dbg_imem_we),
         .mem_addr       (dbg_imem_addr),
         .mem_wdata      (dbg_imem_wdata),
+        .instr_base_addr (csr_desc_ptr),
         .pc_we          (csr_pc_we),
         .pc_wdata       (csr_pc_wdata),
         .halt           (csr_halt || !running),
@@ -187,6 +191,11 @@ module npu_top #(
         .valu_busy      (valu_busy),
         .sfu_busy       (sfu_busy),
         .dma_busy       (ifid_dma_busy),
+        .refill_req     (if_refill_req),
+        .refill_ext_addr(if_refill_ext_addr),
+        .refill_valid   (1'b0),
+        .refill_data    (32'd0),
+        .refill_busy    (if_refill_busy),
         .gemm_cmd_valid (gemm_cmd_valid),
         .valu_cmd_valid (valu_cmd_valid),
         .sfu_cmd_valid  (sfu_cmd_valid),
@@ -1130,7 +1139,10 @@ module npu_top #(
 
     // Debug signal pack (assigned here after all sub-signals are declared)
     assign debug_signals = {
-        20'd0,                              // [31:12] reserved
+        17'd0,                              // [31:15] reserved
+        if_refill_busy,                     // [14] IF refill stream active
+        if_refill_req,                      // [13] IF refill request pending
+        ^if_refill_ext_addr,                // [12] consume refill address for lint
         npu_busy,                           // [11] aggregated busy
         gemm_wb_active,                     // [10] GEMM writeback FSM active
         dma_br_state,                       // [9:8] DMA bridge FSM state
