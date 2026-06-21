@@ -9,6 +9,7 @@ module if_id_top (
     input  logic        halt,
     input  logic        gemm_busy, valu_busy, sfu_busy, dma_busy,
     output logic        gemm_cmd_valid, valu_cmd_valid, sfu_cmd_valid, dma_cmd_valid,
+    output logic        illegal_cmd_valid,
     output logic [31:0] gemm_cmd, valu_cmd, sfu_cmd, dma_cmd,
     output logic [7:0]  debug_pc,
     output logic [7:0]  current_pc,
@@ -39,6 +40,9 @@ module if_id_top (
     wire target_dma  = (opcode >= 8'h40 && opcode <= 8'h42);
     wire is_sync     = (opcode == 8'hF0);
     wire is_wfi      = (opcode == 8'hF1);
+    wire is_nop      = (opcode == 8'hFF);
+    wire target_known = target_gemm || target_valu || target_sfu || target_dma ||
+                        is_sync || is_wfi || is_nop;
 
     wire busy_stall_w = id_valid && (
         (target_gemm && gemm_busy) ||
@@ -69,6 +73,7 @@ module if_id_top (
             valu_cmd_valid <= 1'b0; valu_cmd <= 32'd0;
             sfu_cmd_valid  <= 1'b0; sfu_cmd  <= 32'd0;
             dma_cmd_valid  <= 1'b0; dma_cmd  <= 32'd0;
+            illegal_cmd_valid <= 1'b0;
         end else begin
             if (pc_we) begin
                 pc       <= pc_wdata;
@@ -92,6 +97,7 @@ module if_id_top (
             // ---- Dispatch: pulse cmd valid ----
             gemm_cmd_valid <= 1'b0; valu_cmd_valid <= 1'b0;
             sfu_cmd_valid  <= 1'b0; dma_cmd_valid  <= 1'b0;
+            illegal_cmd_valid <= 1'b0;
 
             if (dispatch_wfi) begin
                 halted <= 1'b1;
@@ -104,6 +110,8 @@ module if_id_top (
                     sfu_cmd_valid  <= 1'b1; sfu_cmd  <= id_instr;
                 end else if (target_dma) begin
                     dma_cmd_valid  <= 1'b1; dma_cmd  <= id_instr;
+                end else if (!target_known) begin
+                    illegal_cmd_valid <= 1'b1;
                 end
             end
         end

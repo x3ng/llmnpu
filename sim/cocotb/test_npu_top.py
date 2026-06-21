@@ -56,6 +56,9 @@ CSR_CTRL_START = 1 << 0
 CSR_CTRL_RESET = 1 << 1
 CSR_CTRL_HALT  = 1 << 2
 
+IRQ_DONE  = 1 << 0
+IRQ_FAULT = 1 << 1
+
 DEBUG_GPL_STATE_SHIFT = 5
 DEBUG_GPL_STATE_MASK = 0x7 << DEBUG_GPL_STATE_SHIFT
 
@@ -694,6 +697,41 @@ async def test_ifid_dma_store_prefills_dma_sram(dut):
         f"IF/ID DMA_ST prefill expected 0x{expected:016X}, got 0x{got:016X}"
     )
     dut._log.info("PASS: IF/ID DMA_ST prefill copies O-SRAM into DMA SRAM")
+
+
+@cocotb.test()
+async def test_illegal_instruction_sets_fault_irq(dut):
+    """Unknown IF/ID opcode raises IRQ_STAT[1] fault."""
+    await setup_dut(dut)
+
+    dut.rst_n.value = 1
+    await RisingEdge(dut.clk)
+    await Timer(1, unit="ps")
+
+    await csr_write(dut, CSR_CTRL, CSR_CTRL_RESET)
+    await if_load(dut, 0, 0xEE000000)
+    await if_load(dut, 1, (OP_VADD << 24) | (1 << 16) | (2 << 8) | 3)
+    await csr_write(dut, CSR_IRQ_EN, IRQ_FAULT)
+    await csr_write(dut, CSR_IRQ_STAT, 0xFFFFFFFF)
+    await csr_write(dut, CSR_CTRL, CSR_CTRL_START)
+
+    fault_seen = False
+    for _ in range(12):
+        await RisingEdge(dut.clk)
+        await Timer(1, unit="ps")
+        irq_stat = await csr_read(dut, CSR_IRQ_STAT)
+        if irq_stat & IRQ_FAULT:
+            fault_seen = True
+            break
+
+    assert fault_seen, "illegal instruction did not set IRQ_STAT[1]"
+    assert int(dut.irq.value) == 1, "fault IRQ output did not assert"
+
+    await ClockCycles(dut.clk, 4)
+    assert not int(dut.valu_cmd_valid.value), (
+        "IF/ID continued dispatching after illegal instruction fault"
+    )
+    dut._log.info("PASS: illegal instruction raises fault IRQ")
 
 
 @cocotb.test()

@@ -17,6 +17,7 @@ module csr (
     // Status inputs from NPU
     input  logic        npu_busy,
     input  logic        npu_going_idle,
+    input  logic        fault_event,
     input  logic [7:0]  current_pc,
 
     // Debug signals (exposed read-only via DEBUG register)
@@ -101,6 +102,8 @@ module csr (
             // (npu_going_idle pulses one cycle before busy falls)
             if (npu_going_idle)
                 irq_stat_reg[0] <= 1'b1;
+            if (fault_event)
+                irq_stat_reg[1] <= 1'b1;
 
             if (we) begin
                 case (waddr)
@@ -179,9 +182,9 @@ module csr (
     // ----------------------------------------------------------------
     // Status register
     //   bit0 = busy (RO, direct from npu_busy)
-    //   bit1 = irq_pend (RO, from irq_stat[0])
+    //   bit1 = irq_pend (RO, any pending IRQ source)
     // ----------------------------------------------------------------
-    assign status_reg = {30'd0, irq_stat_reg[0], npu_busy};
+    assign status_reg = {30'd0, |irq_stat_reg, npu_busy};
 
     // ----------------------------------------------------------------
     // Interrupt generation

@@ -93,6 +93,7 @@ module npu_top #(
     logic        csr_pc_we;
     logic [7:0]  csr_pc_wdata;
     logic [7:0]  if_current_pc;
+    logic        illegal_cmd_valid;
 
     // ================================================================
     // Running flag
@@ -100,6 +101,8 @@ module npu_top #(
     logic running;
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n)
+            running <= 1'b0;
+        else if (illegal_cmd_valid)
             running <= 1'b0;
         else if (csr_start)
             running <= 1'b1;
@@ -131,6 +134,7 @@ module npu_top #(
         .rdata           (csr_rdata),
         .npu_busy        (npu_busy),
         .npu_going_idle  (npu_going_idle),
+        .fault_event     (illegal_cmd_valid),
         .current_pc      (if_current_pc),
         .debug_signals   (debug_signals),
         .npu_start       (csr_start),
@@ -186,6 +190,7 @@ module npu_top #(
         .valu_cmd_valid (valu_cmd_valid),
         .sfu_cmd_valid  (sfu_cmd_valid),
         .dma_cmd_valid  (dma_cmd_valid),
+        .illegal_cmd_valid(illegal_cmd_valid),
         .gemm_cmd       (gemm_cmd),
         .valu_cmd       (valu_cmd),
         .sfu_cmd        (sfu_cmd),

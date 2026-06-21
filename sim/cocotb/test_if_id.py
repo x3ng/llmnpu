@@ -301,6 +301,36 @@ async def test_wfi_halts_dispatch(dut):
 
 
 @cocotb.test()
+async def test_illegal_opcode_reports_fault(dut):
+    """Unknown opcodes report an illegal instruction fault."""
+    await setup_reset(dut)
+
+    await load_instrs(dut, [
+        0xEE000000,
+        NOP,
+    ])
+
+    dut.rst_n.value = 1
+    await Timer(1, unit='ns')
+
+    await RisingEdge(dut.clk)
+    await ReadOnly()
+    assert not int(dut.illegal_cmd_valid.value), \
+        "illegal_cmd_valid asserted before decode stage dispatch"
+
+    await RisingEdge(dut.clk)
+    await ReadOnly()
+    assert int(dut.illegal_cmd_valid.value), \
+        "unknown opcode did not assert illegal_cmd_valid"
+    assert not int(dut.gemm_cmd_valid.value)
+    assert not int(dut.valu_cmd_valid.value)
+    assert not int(dut.sfu_cmd_valid.value)
+    assert not int(dut.dma_cmd_valid.value)
+
+    dut._log.info("PASS: unknown opcode reports illegal instruction")
+
+
+@cocotb.test()
 async def test_pc_load_sets_fetch_address(dut):
     """PC load redirects the next fetched instruction."""
     await setup_reset(dut)
