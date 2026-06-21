@@ -327,9 +327,11 @@ test_e2e: SIM_BUILD = sim_build_e2e
 test_e2e:
 	@rm -rf $(SIM_BUILD)
 	@python3 $(REPO_ROOT)/tools/codegen/generate_golden.py --header > $(REPO_ROOT)/build/golden_gemm.h
-	$(call build_fw,firmware_e2e, \
-		$(SIM_DIR)/cocotb/firmware_e2e.c, \
-		-I$(REPO_ROOT)/build -I$(REPO_ROOT)/sw/driver -I$(REPO_ROOT)/sw/runtime)
+	@echo "=== Building firmware_e2e firmware ==="
+	@mkdir -p $(REPO_ROOT)/build
+	riscv32-none-elf-gcc -march=rv32im -mabi=ilp32 -nostdlib -ffreestanding -O2 \
+		-I$(REPO_ROOT)/build -I$(REPO_ROOT)/sw/driver -I$(REPO_ROOT)/sw/runtime \
+		-c $(SIM_DIR)/cocotb/firmware_e2e.c -o $(REPO_ROOT)/build/firmware_e2e.o
 	riscv32-none-elf-gcc -march=rv32im -mabi=ilp32 -nostdlib -ffreestanding -O2 \
 		-I$(REPO_ROOT)/sw/driver -I$(REPO_ROOT)/sw/runtime \
 		-c $(REPO_ROOT)/sw/driver/npu_driver.c -o $(REPO_ROOT)/build/npu_driver_e2e.o

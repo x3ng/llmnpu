@@ -357,6 +357,7 @@ module npu_top #(
     logic        sfu_mem_wen;
     logic        csr_sfu_start;
     logic        csr_sfu_any_start;
+    logic        ifid_sfu_any_start;
     logic        sfu_tile_start;
     logic        sfu_tile_busy;
     logic        sfu_tile_done;
@@ -381,14 +382,25 @@ module npu_top #(
                                 (csr_issue_opcode == `OP_ACT_TANH) ||
                                 (csr_issue_opcode == `OP_QUANT) ||
                                 (csr_issue_opcode == `OP_DEQUANT));
+    assign ifid_sfu_any_start = sfu_cmd_valid &&
+                                ((sfu_cmd[31:24] == `OP_ACT_RELU) ||
+                                 (sfu_cmd[31:24] == `OP_ACT_RELU6) ||
+                                 (sfu_cmd[31:24] == `OP_ACT_CLIP) ||
+                                 (sfu_cmd[31:24] == `OP_ACT_GELU) ||
+                                 (sfu_cmd[31:24] == `OP_ACT_SIGMOID) ||
+                                 (sfu_cmd[31:24] == `OP_ACT_TANH) ||
+                                 (sfu_cmd[31:24] == `OP_QUANT) ||
+                                 (sfu_cmd[31:24] == `OP_DEQUANT));
     assign csr_sfu_start = csr_sfu_any_start && (pp_gemm_p_ready || pp_sfu_in_ready);
     assign sfu_issue_valid = sfu_cmd_valid || csr_sfu_start;
     assign sfu_tile_start = csr_sfu_any_start && !pp_gemm_p_ready && pp_sfu_in_ready;
     assign sfu_opcode = sfu_tile_valid_in ? sfu_tile_opcode :
                         (csr_sfu_start ? csr_issue_opcode : sfu_cmd[31:24]);
     assign sfu_x_in   = sfu_tile_valid_in ? sfu_tile_x_in : sfu_cmd[7:0];
-    assign sfu_mem_relu_start = csr_sfu_any_start &&
-                                (csr_issue_opcode == `OP_ACT_RELU) &&
+    assign sfu_mem_relu_start = ((csr_sfu_any_start &&
+                                  (csr_issue_opcode == `OP_ACT_RELU)) ||
+                                 (ifid_sfu_any_start &&
+                                  (sfu_cmd[31:24] == `OP_ACT_RELU))) &&
                                 pp_gemm_p_ready;
     assign sfu_valid_in_gated = sfu_tile_valid_in ||
                                 (sfu_issue_valid && !sfu_mem_relu_start &&

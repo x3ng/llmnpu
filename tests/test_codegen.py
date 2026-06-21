@@ -288,9 +288,11 @@ class TestCompiler:
         gm = torch.fx.symbolic_trace(Model())
         graph = NpuCompiler().compile(gm)
 
-        assert len(graph.instructions) == 2
+        assert len(graph.instructions) == 4
         assert graph.instructions[0].opcode == Opcode.GEMM
-        assert graph.instructions[1].opcode == Opcode.ACT_RELU
+        assert graph.instructions[1].opcode == Opcode.SYNC
+        assert graph.instructions[2].opcode == Opcode.ACT_RELU
+        assert graph.instructions[3].opcode == Opcode.WFI
         assert len(graph.descriptors) == 1
         assert len(graph.descriptors[0]) == GEMM_DESCRIPTOR_SIZE
         m, n, k = struct.unpack_from("<HHH", graph.descriptors[0], 0)
@@ -311,9 +313,11 @@ class TestCompiler:
         gm = torch.fx.symbolic_trace(Model())
         graph = NpuCompiler().compile(gm)
 
-        assert len(graph.instructions) == 2
+        assert len(graph.instructions) == 4
         assert graph.instructions[0].opcode == Opcode.GEMM
-        assert graph.instructions[1].opcode == Opcode.ACT_GELU
+        assert graph.instructions[1].opcode == Opcode.SYNC
+        assert graph.instructions[2].opcode == Opcode.ACT_GELU
+        assert graph.instructions[3].opcode == Opcode.WFI
         m, n, k = struct.unpack_from("<HHH", graph.descriptors[0], 0)
         assert (m, n, k) == (1, 1, 1)
 
@@ -329,11 +333,12 @@ class TestCompiler:
         gm = torch.fx.symbolic_trace(Model())
         graph = NpuCompiler().compile(gm)
 
-        assert len(graph.instructions) == 1
+        assert len(graph.instructions) == 2
         instr = graph.instructions[0]
         assert instr.opcode == Opcode.VADD
         assert instr.is_itype is True
         assert instr.opt == VOpt.ADD
+        assert graph.instructions[1].opcode == Opcode.WFI
 
     def test_compile_mul(self):
         torch = pytest.importorskip("torch")
@@ -347,10 +352,11 @@ class TestCompiler:
         gm = torch.fx.symbolic_trace(Model())
         graph = NpuCompiler().compile(gm)
 
-        assert len(graph.instructions) == 1
+        assert len(graph.instructions) == 2
         instr = graph.instructions[0]
         assert instr.opcode == Opcode.VMUL
         assert instr.opt == VOpt.MUL
+        assert graph.instructions[1].opcode == Opcode.WFI
 
     def test_compile_sigmoid(self):
         torch = pytest.importorskip("torch")
@@ -364,8 +370,9 @@ class TestCompiler:
         gm = torch.fx.symbolic_trace(Model())
         graph = NpuCompiler().compile(gm)
 
-        assert len(graph.instructions) == 1
+        assert len(graph.instructions) == 2
         assert graph.instructions[0].opcode == Opcode.ACT_SIGMOID
+        assert graph.instructions[1].opcode == Opcode.WFI
 
     def test_compile_tanh(self):
         torch = pytest.importorskip("torch")
@@ -379,8 +386,9 @@ class TestCompiler:
         gm = torch.fx.symbolic_trace(Model())
         graph = NpuCompiler().compile(gm)
 
-        assert len(graph.instructions) == 1
+        assert len(graph.instructions) == 2
         assert graph.instructions[0].opcode == Opcode.ACT_TANH
+        assert graph.instructions[1].opcode == Opcode.WFI
 
     # -- end-to-end binary round-trip -------------------------------------
     def test_end_to_end_binary(self):
@@ -408,7 +416,7 @@ class TestCompiler:
             assert data[:4] == MAGIC
             ver, ni, nd = struct.unpack("<III", data[4:16])
             assert ver == 1
-            assert ni == 2       # GEMM + ACT_RELU
+            assert ni == 4       # GEMM + SYNC + ACT_RELU + WFI
             assert nd == 1       # one GEMM descriptor
         finally:
             os.unlink(path)
@@ -440,18 +448,20 @@ class TestNpuTorch:
 
             assert os.fspath(result.out_path) == path
             assert result.input_shape == (1, 16)
-            assert result.num_instructions == 2
+            assert result.num_instructions == 4
             assert result.num_descriptors == 1
             assert result.graph.instructions[0].opcode == Opcode.GEMM
-            assert result.graph.instructions[1].opcode == Opcode.ACT_RELU
+            assert result.graph.instructions[1].opcode == Opcode.SYNC
+            assert result.graph.instructions[2].opcode == Opcode.ACT_RELU
+            assert result.graph.instructions[3].opcode == Opcode.WFI
 
             with open(path, "rb") as fh:
                 data = fh.read()
             assert data[:4] == MAGIC
             ver, ni, nd = struct.unpack("<III", data[4:16])
             assert ver == 1
-            assert ni == 2
+            assert ni == 4
             assert nd == 1
-            assert len(data) == 16 + 2 * 4 + 1 * GEMM_DESCRIPTOR_SLOT_SIZE
+            assert len(data) == 16 + 4 * 4 + 1 * GEMM_DESCRIPTOR_SLOT_SIZE
         finally:
             os.unlink(path)

@@ -68,7 +68,31 @@ class NpuCompiler:
             elif node.op == "output":
                 pass  # terminal node — nothing to emit
 
-        return NpuGraph(instructions=instructions, descriptors=descriptors)
+        return NpuGraph(
+            instructions=self._make_executable(instructions),
+            descriptors=descriptors,
+        )
+
+    @staticmethod
+    def _make_executable(instructions: list[NpuInstruction]) -> list[NpuInstruction]:
+        """Insert conservative barriers and a final WFI for RTL execution.
+
+        The current RTL executes one shared SRAM dataflow at a time.  A SYNC
+        between generated ops preserves producer/consumer order, while WFI
+        gives ``npu_run_program`` a bounded IF/ID stream.
+        """
+        if not instructions:
+            return [NpuInstruction(opcode=Opcode.WFI)]
+
+        program: list[NpuInstruction] = []
+        for idx, instr in enumerate(instructions):
+            program.append(instr)
+            if idx != len(instructions) - 1:
+                program.append(NpuInstruction(opcode=Opcode.SYNC))
+
+        if program[-1].opcode != Opcode.WFI:
+            program.append(NpuInstruction(opcode=Opcode.WFI))
+        return program
 
     # ------------------------------------------------------------------
     #  Linear → GEMM

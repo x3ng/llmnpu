@@ -1,7 +1,7 @@
-// E2E program/runtime test:
-//   CPU loads A/B tiles, runs a serialized .npu GEMM program through
-//   npu_run_program(), issues an SFU ReLU postprocess through the driver,
-//   stores O-SRAM back to memory, and checks results.
+// E2E generated-program/runtime test:
+//   CPU loads A/B tiles, then npu_run_program() executes a codegen-style
+//   .npu stream: GEMM -> SYNC -> ACT_RELU -> WFI.  The ReLU must be issued
+//   by IF/ID and postprocess the GEMM P-buffer before DMA STORE.
 
 #include <stdint.h>
 #include "../../sw/driver/npu_driver.h"
@@ -15,20 +15,19 @@ static int8_t B[TILE * TILE] __attribute__((aligned(8)));
 static int16_t C[TILE * TILE] __attribute__((aligned(8)));
 
 static const uint8_t program_image[] __attribute__((aligned(8))) = {
-    // Header: magic "NPUC", version=1, num_instr=6, num_desc=1
+    // Header: magic "NPUC", version=1, num_instr=4, num_desc=1
     0x4e, 0x50, 0x55, 0x43,
     0x01, 0x00, 0x00, 0x00,
-    0x06, 0x00, 0x00, 0x00,
+    0x04, 0x00, 0x00, 0x00,
     0x01, 0x00, 0x00, 0x00,
 
-    // Four NOPs force IF/ID execution past the legacy 4-word imem limit.
-    0x00, 0x00, 0x00, 0xff,
-    0x00, 0x00, 0x00, 0xff,
-    0x00, 0x00, 0x00, 0xff,
-    0x00, 0x00, 0x00, 0xff,
     // Instruction: OP_GEMM, desc_ref_words=0, aux=0
     0x00, 0x00, 0x00, 0x01,
-    // Instruction: OP_WFI, halt IF/ID after issuing GEMM
+    // Instruction: OP_SYNC, wait for GEMM writeback/P-buffer ready
+    0x00, 0x00, 0x00, 0xf0,
+    // Instruction: OP_ACT_RELU, IF/ID postprocesses GEMM P-buffer
+    0x00, 0x00, 0x00, 0x20,
+    // Instruction: OP_WFI, halt IF/ID after generated stream
     0x00, 0x00, 0x00, 0xf1,
 
     // GEMM descriptor slot, 20 bytes:
@@ -81,11 +80,6 @@ void main(void)
     }
     uart_putc('g');
 
-    if (npu_issue(&npu, NPU_OP_ACT_RELU, 0u) != 0 ||
-        npu_wait_done(&npu, 1000000u) != 0) {
-        uart_putc('R');
-        while (1) __asm__ volatile ("wfi");
-    }
     uart_putc('p');
 
     if (npu_dma_st(&npu, (uint32_t)(uintptr_t)C,
