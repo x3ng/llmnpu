@@ -1151,6 +1151,89 @@ async def test_tile_flow_dma_load_gemm_dma_store_result(dut):
 
 
 @cocotb.test()
+async def test_tile_flow_gemm_sfu_relu_dma_store_result(dut):
+    """NPU postprocess flow: DMA LOAD, GEMM, SFU ReLU on P, DMA STORE."""
+    await setup_dut(dut)
+
+    dut.rst_n.value = 1
+    await RisingEdge(dut.clk)
+    await Timer(1, unit="ps")
+
+    await csr_write(dut, CSR_CTRL, CSR_CTRL_RESET)
+    for i in range(4):
+        await if_load(dut, i, (OP_WFI << 24))
+    await csr_write(dut, CSR_CTRL, 0)
+    await ClockCycles(dut.clk, 2)
+
+    a_ext = 0x00004400
+    b_ext = 0x00005400
+    c_ext = 0x00006400
+    a_mat = [[-1 for _ in range(16)] for _ in range(16)]
+    b_mat = [[1 for _ in range(16)] for _ in range(16)]
+    dma_ext_write_i8_tile(dut, a_ext, a_mat)
+    dma_ext_write_i8_tile(dut, b_ext, b_mat)
+    await Timer(1, unit="ps")
+
+    await start_dma_load_and_collect_copy_addrs(
+        dut, a_ext, ASRAM_BASE, 256, timeout_cycles=2000)
+    await start_dma_load_and_collect_copy_addrs(
+        dut, b_ext, WSRAM_BASE, 256, timeout_cycles=2000)
+
+    dsram_write_word(dut, DSRAM_BASE + 0, 0x00010001)
+    dsram_write_word(dut, DSRAM_BASE + 4, 0x01000001)
+    dsram_write_word(dut, DSRAM_BASE + 8, 0x00000002)
+    dsram_write_word(dut, DSRAM_BASE + 12, 0x01000000)
+    dsram_write_word(dut, DSRAM_BASE + 16, 0x00000000)
+    await Timer(1, unit="ps")
+
+    await csr_write(dut, CSR_DESC_PTR, DSRAM_BASE)
+    await csr_write(dut, CSR_CTRL, ctrl_start(OP_GEMM))
+    await wait_gemm_idle_after_busy(dut, timeout_cycles=2200)
+
+    pre_relu = osram_read_word(dut, OSRAM_BASE)
+    assert pre_relu == 0xFFF0FFF0, (
+        f"GEMM before ReLU expected 0xFFF0FFF0, got 0x{pre_relu:08X}"
+    )
+
+    await csr_write(dut, CSR_CTRL, ctrl_start(OP_ACT_RELU))
+    sfu_seen = False
+    sfu_done_seen = False
+    for _ in range(900):
+        await RisingEdge(dut.clk)
+        await Timer(1, unit="ps")
+        if int(dut.sfu_busy.value):
+            sfu_seen = True
+        if int(dut.sfu_mem_relu_done.value):
+            sfu_done_seen = True
+        if sfu_seen and not int(dut.sfu_busy.value):
+            break
+
+    assert sfu_seen, "SFU ReLU postprocess did not start"
+    assert sfu_done_seen, "SFU ReLU postprocess did not complete"
+    post_relu = osram_read_word(dut, OSRAM_BASE)
+    assert post_relu == 0x00000000, (
+        f"SFU ReLU should clamp P word to zero, got 0x{post_relu:08X}"
+    )
+
+    await start_dma_store_and_collect_prefill_addrs(
+        dut, c_ext, OSRAM_BASE, 512, timeout_cycles=2200)
+
+    mismatches = []
+    for r in range(16):
+        for c in range(16):
+            byte_addr = c_ext + r * 32 + (c // 2) * 4
+            word = dma_ext_read_word(dut, byte_addr)
+            raw = (word >> (16 * (c & 1))) & 0xFFFF
+            if raw != 0:
+                mismatches.append((r, c, raw))
+
+    assert not mismatches, (
+        f"postprocess tile output mismatches: {mismatches[:8]} total={len(mismatches)}"
+    )
+    dut._log.info("PASS: tile flow GEMM -> SFU ReLU -> DMA STORE result")
+
+
+@cocotb.test()
 async def test_ifid_dma_store_prefills_dma_sram(dut):
     """IF/ID DMA_ST uses the crossbar prefill path before starting STORE."""
     await setup_dut(dut)

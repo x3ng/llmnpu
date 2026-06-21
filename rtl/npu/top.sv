@@ -242,6 +242,13 @@ module npu_top #(
     logic        gemm_issue_desc_fetch;
     logic [15:0] gemm_issue_desc_ptr;
 
+    logic pp_gemm_a_fill, pp_gemm_a_consume;
+    logic pp_gemm_a_fill_bank, pp_gemm_a_active_bank, pp_gemm_a_ready;
+    logic pp_gemm_b_fill, pp_gemm_b_consume;
+    logic pp_gemm_b_fill_bank, pp_gemm_b_active_bank, pp_gemm_b_ready;
+    logic pp_gemm_p_fill, pp_gemm_p_consume;
+    logic pp_gemm_p_fill_bank, pp_gemm_p_active_bank, pp_gemm_p_ready;
+
     assign csr_gemm_start   = csr_start && (csr_issue_opcode == `OP_GEMM);
     assign if_gemm_desc_start = gemm_cmd_valid &&
                                 ((gemm_cmd[31:24] == `OP_GEMM) ||
@@ -328,10 +335,22 @@ module npu_top #(
     logic [7:0]  sfu_x_in;
     logic        sfu_valid_out;
     logic [7:0]  sfu_y_out;
+    logic        sfu_mem_relu_start;
+    logic        sfu_mem_relu_active;
+    logic        sfu_mem_relu_done;
+    logic        sfu_mem_req;
+    logic [15:0] sfu_mem_addr;
+    logic [31:0] sfu_mem_wdata;
+    logic        sfu_mem_wen;
+    logic        csr_sfu_start;
+    logic        sfu_issue_valid;
 
-    assign sfu_opcode = sfu_cmd[31:24];
+    assign csr_sfu_start = csr_start && (csr_issue_opcode == `OP_ACT_RELU) && pp_gemm_p_ready;
+    assign sfu_issue_valid = sfu_cmd_valid || csr_sfu_start;
+    assign sfu_opcode = csr_sfu_start ? `OP_ACT_RELU : sfu_cmd[31:24];
     assign sfu_x_in   = sfu_cmd[7:0];
-    assign sfu_valid_in_gated = sfu_cmd_valid;
+    assign sfu_mem_relu_start = sfu_issue_valid && (sfu_opcode == `OP_ACT_RELU) && pp_gemm_p_ready;
+    assign sfu_valid_in_gated = sfu_issue_valid && !sfu_mem_relu_start;
 
     sfu_top u_sfu (
         .clk,
@@ -353,7 +372,7 @@ module npu_top #(
         else
             sfu_pipe <= {sfu_pipe[2:0], sfu_valid_in_gated};
     end
-    assign sfu_busy = |sfu_pipe;
+    assign sfu_busy = |sfu_pipe || sfu_mem_relu_active;
 
     // ================================================================
     // DMA — Direct Memory Access
@@ -593,13 +612,6 @@ module npu_top #(
     logic [15:0] m0_addr, m1_addr, m2_addr;
     logic [31:0] m0_wdata, m1_wdata, m2_wdata;
     logic        m0_wen,  m1_wen,  m2_wen;
-
-    logic pp_gemm_a_fill, pp_gemm_a_consume;
-    logic pp_gemm_a_fill_bank, pp_gemm_a_active_bank, pp_gemm_a_ready;
-    logic pp_gemm_b_fill, pp_gemm_b_consume;
-    logic pp_gemm_b_fill_bank, pp_gemm_b_active_bank, pp_gemm_b_ready;
-    logic pp_gemm_p_fill, pp_gemm_p_consume;
-    logic pp_gemm_p_fill_bank, pp_gemm_p_active_bank, pp_gemm_p_ready;
 
     wire dma_target_asram = (csr_dma_sram_addr[15:12] == 4'h0);
     wire dma_target_wsram = (csr_dma_sram_addr[15:12] == 4'h1);
@@ -1170,13 +1182,91 @@ module npu_top #(
     assign gemm_wb_addr  = gpl_o_base + gemm_p_fill_offset + {gemm_wb_cnt, 2'b00};
     assign gemm_wb_wdata = wb_word_arr[gemm_wb_cnt];
 
-    // M2 is exclusively used by GEMM writeback. VALU/SFU have no
-    // read-data path from M2; including them in m2_req causes useless
-    // OSRAM reads that contend with GEMM writeback and DMA bridge.
-    assign m2_req   = gemm_wb_active;
-    assign m2_addr  = gemm_wb_addr;
-    assign m2_wdata = gemm_wb_wdata;
-    assign m2_wen   = gemm_wb_active;
+    // ================================================================
+    // SFU P-buffer ReLU postprocess
+    // ================================================================
+    typedef enum logic [1:0] {
+        SFU_MEM_IDLE  = 2'd0,
+        SFU_MEM_READ  = 2'd1,
+        SFU_MEM_WRITE = 2'd2
+    } sfu_mem_state_t;
+
+    sfu_mem_state_t sfu_mem_state, sfu_mem_next;
+    logic [6:0]     sfu_mem_cnt;
+    logic [15:0]    sfu_mem_base;
+
+    function automatic logic [15:0] relu16(input logic [15:0] x);
+        begin
+            relu16 = x[15] ? 16'd0 : x;
+        end
+    endfunction
+
+    always_ff @(posedge clk or negedge dp_rst_n) begin
+        if (!dp_rst_n) begin
+            sfu_mem_state       <= SFU_MEM_IDLE;
+            sfu_mem_cnt         <= 7'd0;
+            sfu_mem_base        <= `OSRAM_BASE;
+            sfu_mem_relu_active <= 1'b0;
+            sfu_mem_relu_done   <= 1'b0;
+        end else begin
+            sfu_mem_state     <= sfu_mem_next;
+            sfu_mem_relu_done <= 1'b0;
+
+            case (sfu_mem_state)
+                SFU_MEM_IDLE: begin
+                    sfu_mem_cnt         <= 7'd0;
+                    sfu_mem_relu_active <= 1'b0;
+                    if (sfu_mem_relu_start) begin
+                        sfu_mem_base        <= gpl_o_base + dma_gemm_p_active_offset;
+                        sfu_mem_relu_active <= 1'b1;
+                    end
+                end
+                SFU_MEM_READ: begin
+                    sfu_mem_relu_active <= 1'b1;
+                end
+                SFU_MEM_WRITE: begin
+                    sfu_mem_relu_active <= 1'b1;
+                    if (xbar_m2_grant) begin
+                        if (sfu_mem_cnt == 7'd127) begin
+                            sfu_mem_relu_active <= 1'b0;
+                            sfu_mem_relu_done   <= 1'b1;
+                        end else begin
+                            sfu_mem_cnt <= sfu_mem_cnt + 7'd1;
+                        end
+                    end
+                end
+                default: begin
+                    sfu_mem_relu_active <= 1'b0;
+                end
+            endcase
+        end
+    end
+
+    always_comb begin
+        sfu_mem_next = sfu_mem_state;
+        case (sfu_mem_state)
+            SFU_MEM_IDLE:  if (sfu_mem_relu_start) sfu_mem_next = SFU_MEM_READ;
+            SFU_MEM_READ:  if (xbar_m2_grant)      sfu_mem_next = SFU_MEM_WRITE;
+            SFU_MEM_WRITE: if (xbar_m2_grant) begin
+                               if (sfu_mem_cnt == 7'd127)
+                                   sfu_mem_next = SFU_MEM_IDLE;
+                               else
+                                   sfu_mem_next = SFU_MEM_READ;
+                           end
+            default: sfu_mem_next = SFU_MEM_IDLE;
+        endcase
+    end
+
+    assign sfu_mem_req   = (sfu_mem_state == SFU_MEM_READ) ||
+                           (sfu_mem_state == SFU_MEM_WRITE);
+    assign sfu_mem_addr  = sfu_mem_base + {sfu_mem_cnt, 2'b00};
+    assign sfu_mem_wdata = {relu16(xbar_m2_rdata[31:16]), relu16(xbar_m2_rdata[15:0])};
+    assign sfu_mem_wen   = (sfu_mem_state == SFU_MEM_WRITE);
+
+    assign m2_req   = gemm_wb_active || sfu_mem_req;
+    assign m2_addr  = gemm_wb_active ? gemm_wb_addr  : sfu_mem_addr;
+    assign m2_wdata = gemm_wb_active ? gemm_wb_wdata : sfu_mem_wdata;
+    assign m2_wen   = gemm_wb_active ? 1'b1          : sfu_mem_wen;
 
     // ================================================================
     // Ping-pong buffer controllers
@@ -1247,8 +1337,8 @@ module npu_top #(
     assign pp_gemm_p_consume = prefill_done && dma_target_osram;
     assign pp_valu_fill      = 1'b0;
     assign pp_valu_consume   = valu_done;
-    assign pp_sfu_fill       = 1'b0;
-    assign pp_sfu_consume    = sfu_valid_out;
+    assign pp_sfu_fill       = sfu_mem_relu_done;
+    assign pp_sfu_consume    = sfu_valid_out || sfu_mem_relu_done;
 
     // ================================================================
     // Global busy aggregation
@@ -1279,7 +1369,7 @@ module npu_top #(
 
     assign npu_going_idle = (valu_busy && valu_done)  ||
                             (dma_busy  && dma_done)   ||
-                            (sfu_busy  && sfu_valid_out) ||
+                            (sfu_busy  && (sfu_valid_out || sfu_mem_relu_done)) ||
                             (bridge_busy && dma_br_next == DMA_BR_IDLE) ||
                             (gemm_wb_active && xbar_m2_grant && gemm_wb_cnt == 7'd127);
 
