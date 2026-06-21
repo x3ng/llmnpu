@@ -128,6 +128,47 @@ async def valu_read_reg(dut, reg_idx):
     return unpack_bytes(val)
 
 
+async def respond_axi_read_burst(dut, expected_addr, words):
+    """Respond to one 64-bit AXI read burst with little-endian 32-bit words."""
+    assert len(words) == 32, "IF refill expects exactly 32 instruction words"
+
+    for _ in range(80):
+        if int(dut.dma_axi_arvalid.value):
+            break
+        await RisingEdge(dut.clk)
+    else:
+        raise AssertionError("AXI read address was not issued for IF refill")
+
+    araddr = int(dut.dma_axi_araddr.value)
+    arlen = int(dut.dma_axi_arlen.value)
+    assert araddr == expected_addr, (
+        f"IF refill ARADDR mismatch: got 0x{araddr:08X}, "
+        f"expected 0x{expected_addr:08X}"
+    )
+    assert arlen == 15, f"IF refill ARLEN should be 15 for 16 beats, got {arlen}"
+
+    dut.dma_axi_arready.value = 1
+    await RisingEdge(dut.clk)
+    dut.dma_axi_arready.value = 0
+
+    for beat in range(16):
+        await Timer(1, unit="ps")
+        while not int(dut.dma_axi_rready.value):
+            await RisingEdge(dut.clk)
+            await Timer(1, unit="ps")
+
+        lo = words[2 * beat] & 0xFFFFFFFF
+        hi = words[2 * beat + 1] & 0xFFFFFFFF
+        dut.dma_axi_rdata.value = (hi << 32) | lo
+        dut.dma_axi_rresp.value = 0
+        dut.dma_axi_rlast.value = int(beat == 15)
+        dut.dma_axi_rvalid.value = 1
+        await RisingEdge(dut.clk)
+        dut.dma_axi_rvalid.value = 0
+        dut.dma_axi_rlast.value = 0
+        await Timer(1, unit="ps")
+
+
 def dsram_write_word(dut, byte_addr, value):
     """Write a 32-bit word directly into DSRAM for focused top-level tests."""
     word_idx = (byte_addr - DSRAM_BASE) >> 2
@@ -951,6 +992,73 @@ async def test_csr_halt_stalls_ifid_only(dut):
 
     assert dispatched, "IF/ID did not resume dispatch after CSR_CTRL.HALT cleared"
     dut._log.info("PASS: CSR CTRL.HALT stalls IF/ID dispatch and resumes cleanly")
+
+
+@cocotb.test()
+async def test_ifid_refill_fetches_program_from_axi(dut):
+    """IF/ID refills a missing instruction block from external AXI memory."""
+    await setup_dut(dut)
+
+    dut.rst_n.value = 1
+    await RisingEdge(dut.clk)
+    await Timer(1, unit="ps")
+
+    instr_base = 0x00000400
+    start_pc = 224
+    refill_addr = instr_base + (start_pc >> 5) * 128
+    vadd_instr = (OP_VADD << 24) | (0x00 << 20) | (1 << 16) | (2 << 8) | 3
+    words = [0xFF000000] * 32
+    words[0] = vadd_instr
+    words[1] = (OP_WFI << 24)
+
+    await valu_write_reg(dut, 2, [11] * 64)
+    await valu_write_reg(dut, 3, [24] * 64)
+    await valu_write_reg(dut, 1, [0] * 64)
+    await csr_write(dut, CSR_DESC_PTR, instr_base)
+    await csr_write(dut, CSR_PC, start_pc)
+
+    refill_task = cocotb.start_soon(respond_axi_read_burst(dut, refill_addr, words))
+    await csr_write(dut, CSR_CTRL, CSR_CTRL_START)
+    await refill_task
+    await RisingEdge(dut.clk)
+    await Timer(1, unit="ps")
+
+    imem_vadd = int(dut.u_if_id.imem[start_pc].value) & 0xFFFFFFFF
+    imem_wfi = int(dut.u_if_id.imem[start_pc + 1].value) & 0xFFFFFFFF
+    assert imem_vadd == vadd_instr, (
+        f"refilled imem[{start_pc}] got 0x{imem_vadd:08X}, "
+        f"expected 0x{vadd_instr:08X}"
+    )
+    assert imem_wfi == (OP_WFI << 24), (
+        f"refilled imem[{start_pc + 1}] got 0x{imem_wfi:08X}, "
+        f"expected WFI"
+    )
+
+    expected = 35
+    for _ in range(120):
+        result = await valu_read_reg(dut, 1)
+        if result[0] == expected:
+            break
+        await RisingEdge(dut.clk)
+    else:
+        raise AssertionError(
+            f"IF refill program did not execute VADD, lane0={result[0]} "
+            f"pc={int(dut.if_current_pc.value)} "
+            f"debug_pc={int(dut.debug_pc.value)} "
+            f"debug_instr=0x{int(dut.debug_instr.value):08X} "
+            f"stall={int(dut.if_stall.value)} "
+            f"block_valid=0x{int(dut.u_if_id.block_valid.value):02X} "
+            f"refill_active={int(dut.u_if_id.refill_active.value)} "
+            f"refill_idx={int(dut.u_if_id.refill_idx.value)} "
+            f"refill_block={int(dut.u_if_id.refill_block.value)} "
+            f"ifr_state={int(dut.ifr_state.value)} "
+            f"running={int(dut.running.value)} "
+            f"valu_busy={int(dut.valu_busy.value)}"
+        )
+
+    assert int(dut.if_refill_busy.value) == 0, "IF refill stream stayed busy"
+    assert int(dut.ifr_active.value) == 0, "IF refill AXI FSM stayed active"
+    dut._log.info("PASS: IF/ID refill fetches AXI program block and dispatches VADD")
 
 
 @cocotb.test()

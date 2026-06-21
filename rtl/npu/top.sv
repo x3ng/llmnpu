@@ -183,6 +183,8 @@ module npu_top #(
     logic        if_refill_req;
     logic [31:0] if_refill_ext_addr;
     logic        if_refill_busy;
+    logic        if_refill_valid;
+    logic [31:0] if_refill_data;
 
     // ================================================================
     // IF/ID Pipeline
@@ -203,8 +205,8 @@ module npu_top #(
         .dma_busy       (ifid_dma_busy),
         .refill_req     (if_refill_req),
         .refill_ext_addr(if_refill_ext_addr),
-        .refill_valid   (1'b0),
-        .refill_data    (32'd0),
+        .refill_valid   (if_refill_valid),
+        .refill_data    (if_refill_data),
         .refill_busy    (if_refill_busy),
         .gemm_cmd_valid (gemm_cmd_valid),
         .valu_cmd_valid (valu_cmd_valid),
@@ -425,6 +427,15 @@ module npu_top #(
     logic [31:0] dma_sim_ext_addr;
     logic [63:0] dma_sim_ext_wdata;
     logic [63:0] dma_sim_ext_rdata;
+    logic [31:0] dma_m_axi_araddr;
+    logic [7:0]  dma_m_axi_arlen;
+    logic        dma_m_axi_arvalid;
+    logic        dma_m_axi_arready;
+    logic [63:0] dma_m_axi_rdata;
+    logic [1:0]  dma_m_axi_rresp;
+    logic        dma_m_axi_rlast;
+    logic        dma_m_axi_rvalid;
+    logic        dma_m_axi_rready;
 
     npu_dma #(
         .STANDALONE (DMA_STANDALONE)
@@ -447,15 +458,15 @@ module npu_top #(
         .pp_ready      (),
 
         // AXI passthrough
-        .m_axi_araddr  (dma_axi_araddr),
-        .m_axi_arlen   (dma_axi_arlen),
-        .m_axi_arvalid (dma_axi_arvalid),
-        .m_axi_arready (dma_axi_arready),
-        .m_axi_rdata   (dma_axi_rdata),
-        .m_axi_rresp   (dma_axi_rresp),
-        .m_axi_rlast   (dma_axi_rlast),
-        .m_axi_rvalid  (dma_axi_rvalid),
-        .m_axi_rready  (dma_axi_rready),
+        .m_axi_araddr  (dma_m_axi_araddr),
+        .m_axi_arlen   (dma_m_axi_arlen),
+        .m_axi_arvalid (dma_m_axi_arvalid),
+        .m_axi_arready (dma_m_axi_arready),
+        .m_axi_rdata   (dma_m_axi_rdata),
+        .m_axi_rresp   (dma_m_axi_rresp),
+        .m_axi_rlast   (dma_m_axi_rlast),
+        .m_axi_rvalid  (dma_m_axi_rvalid),
+        .m_axi_rready  (dma_m_axi_rready),
         .m_axi_awaddr  (dma_axi_awaddr),
         .m_axi_awlen   (dma_axi_awlen),
         .m_axi_awvalid (dma_axi_awvalid),
@@ -481,6 +492,96 @@ module npu_top #(
         .sim_ext_wdata (dma_sim_ext_wdata),
         .sim_ext_rdata (dma_sim_ext_rdata)
     );
+
+    // IF/ID instruction refill uses the AXI read channel when the DMA engine
+    // is not already issuing a read.  One 32-instruction refill block maps to
+    // sixteen 64-bit AXI beats.
+    typedef enum logic [2:0] {
+        IFR_IDLE   = 3'd0,
+        IFR_AR     = 3'd1,
+        IFR_R_LO   = 3'd2,
+        IFR_OUT_LO = 3'd3,
+        IFR_OUT_HI = 3'd4
+    } ifr_state_t;
+
+    ifr_state_t ifr_state;
+    logic [31:0] ifr_addr;
+    logic [4:0]  ifr_word_idx;
+    logic [63:0] ifr_beat_data;
+    wire         ifr_active = (ifr_state != IFR_IDLE);
+    wire         ifr_can_start = if_refill_req &&
+                                 !ifr_active &&
+                                 !dma_busy &&
+                                 !dma_load_inflight &&
+                                 (dma_br_state == DMA_BR_IDLE) &&
+                                 !dma_start &&
+                                 !dma_m_axi_arvalid;
+
+    always_ff @(posedge clk or negedge dp_rst_n) begin
+        if (!dp_rst_n) begin
+            ifr_state        <= IFR_IDLE;
+            ifr_addr         <= 32'd0;
+            ifr_word_idx     <= 5'd0;
+            ifr_beat_data    <= 64'd0;
+        end else begin
+            case (ifr_state)
+                IFR_IDLE: begin
+                    if (ifr_can_start) begin
+                        ifr_addr     <= if_refill_ext_addr;
+                        ifr_word_idx <= 5'd0;
+                        ifr_state    <= IFR_AR;
+                    end
+                end
+
+                IFR_AR: begin
+                    if (dma_axi_arready)
+                        ifr_state <= IFR_R_LO;
+                end
+
+                IFR_R_LO: begin
+                    if (dma_axi_rvalid) begin
+                        ifr_beat_data   <= dma_axi_rdata;
+                        ifr_state       <= IFR_OUT_LO;
+                    end
+                end
+
+                IFR_OUT_LO: begin
+                    ifr_state <= IFR_OUT_HI;
+                end
+
+                IFR_OUT_HI: begin
+                    if (ifr_word_idx == 5'd30) begin
+                        ifr_word_idx <= 5'd0;
+                        ifr_state    <= IFR_IDLE;
+                    end else begin
+                        ifr_word_idx <= ifr_word_idx + 5'd2;
+                        ifr_state    <= IFR_R_LO;
+                    end
+                end
+
+                default: begin
+                    ifr_state <= IFR_IDLE;
+                end
+            endcase
+        end
+    end
+
+    assign if_refill_valid = (ifr_state == IFR_OUT_LO) ||
+                             (ifr_state == IFR_OUT_HI);
+    assign if_refill_data  = (ifr_state == IFR_OUT_LO)
+                           ? ifr_beat_data[31:0]
+                           : ifr_beat_data[63:32];
+
+    assign dma_axi_araddr  = ifr_active ? ifr_addr : dma_m_axi_araddr;
+    assign dma_axi_arlen   = ifr_active ? 8'd15 : dma_m_axi_arlen;
+    assign dma_axi_arvalid = (ifr_state == IFR_AR) ? 1'b1 : dma_m_axi_arvalid;
+    assign dma_m_axi_arready = !ifr_active && dma_axi_arready;
+
+    assign dma_m_axi_rdata  = dma_axi_rdata;
+    assign dma_m_axi_rresp  = dma_axi_rresp;
+    assign dma_m_axi_rlast  = dma_axi_rlast;
+    assign dma_m_axi_rvalid = !ifr_active && dma_axi_rvalid;
+    assign dma_axi_rready   = ifr_active ? (ifr_state == IFR_R_LO) : dma_m_axi_rready;
 
     // ================================================================
     // Crossbar — 3-master x 4-slave interconnect to SRAM banks
@@ -1135,16 +1236,18 @@ module npu_top #(
     assign ifid_gemm_busy = gemm_cmd_valid || gemm_busy || gemm_preload_busy ||
                             gemm_psum_valid || gemm_wb_active;
     assign ifid_dma_busy = dma_cmd_valid || dma_busy || bridge_busy ||
-                           dma_load_inflight || dma_restart;
+                           dma_load_inflight || dma_restart || ifr_active;
 
     assign npu_busy = gemm_busy || valu_busy || sfu_busy || dma_busy ||
                       bridge_busy || dma_load_inflight || gemm_preload_busy ||
-                      gemm_psum_valid || gemm_wb_active;
+                      gemm_psum_valid || gemm_wb_active || ifr_active ||
+                      if_refill_req;
     assign perf_gemm_busy = gemm_busy || gemm_preload_busy ||
                             gemm_psum_valid || gemm_wb_active;
     assign perf_valu_busy = valu_busy;
     assign perf_sfu_busy  = sfu_busy;
-    assign perf_dma_busy  = dma_busy || bridge_busy || dma_load_inflight;
+    assign perf_dma_busy  = dma_busy || bridge_busy || dma_load_inflight ||
+                            ifr_active;
 
     assign npu_going_idle = (valu_busy && valu_done)  ||
                             (dma_busy  && dma_done)   ||
@@ -1154,7 +1257,8 @@ module npu_top #(
 
     // Debug signal pack (assigned here after all sub-signals are declared)
     assign debug_signals = {
-        17'd0,                              // [31:15] reserved
+        16'd0,                              // [31:16] reserved
+        ifr_active,                         // [15] IF refill AXI read active
         if_refill_busy,                     // [14] IF refill stream active
         if_refill_req,                      // [13] IF refill request pending
         ^if_refill_ext_addr,                // [12] consume refill address for lint
