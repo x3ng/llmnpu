@@ -9,7 +9,7 @@
 // Feature set (initial version):
 //   - 1D linear LOAD (OP_DMA_LD)  ext→sram
 //   - 1D linear STORE (OP_DMA_ST) sram→ext
-//   - 2D LOAD with row bytes and external/SRAM strides
+//   - 2D LOAD/STORE with row bytes and external/SRAM strides
 //   - Ping-pong buffer coordination via bank flip
 // ============================================================
 
@@ -268,7 +268,8 @@ module npu_dma #(
                             default:     r_mode <= 2'b00;
                         endcase
 
-                        if (opcode == `OP_DMA_2D) begin
+                        if ((opcode == `OP_DMA_2D) ||
+                            ((opcode == `OP_DMA_ST) && (row_count != 16'd0) && (row_bytes != 16'd0))) begin
                             r_row_count   <= (row_count == 16'd0) ? 16'd1 : row_count;
                             r_row_bytes   <= row_bytes;
                             r_ext_stride  <= (ext_stride == 16'd0) ? row_bytes : ext_stride;

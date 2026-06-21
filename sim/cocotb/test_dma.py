@@ -372,3 +372,73 @@ async def test_dma_2d_load_strided(dut):
         f"test_dma_2d_load_strided PASS: rows={rows}, row_bytes={row_bytes}, "
         f"ext_stride={ext_stride}, sram_stride={sram_stride}"
     )
+
+
+@cocotb.test()
+async def test_dma_2d_store_strided(dut):
+    """2D DMA STORE copies SRAM rows to external memory with strides."""
+    clock = Clock(dut.clk, 2, unit="ns")
+    cocotb.start_soon(clock.start())
+
+    dut.start.value = 0
+    dut.opcode.value = 0
+    dut.ext_addr.value = 0
+    dut.sram_addr.value = 0
+    dut.length.value = 0
+    dut.row_count.value = 0
+    dut.row_bytes.value = 0
+    dut.ext_stride.value = 0
+    dut.sram_stride.value = 0
+    dut.sim_ext_en.value = 0
+    dut.sim_ext_we.value = 0
+    dut.sim_ext_addr.value = 0
+    dut.sim_ext_wdata.value = 0
+    dut.sim_sram_en.value = 0
+    dut.sim_sram_we.value = 0
+    dut.sim_sram_addr.value = 0
+    dut.sim_sram_wdata.value = 0
+
+    await reset_dut(dut)
+
+    rows = 3
+    row_bytes = 16
+    ext_stride = 40
+    sram_stride = 24
+    ext_base = 0xA00
+    sram_base = 0xB00
+    pattern = [
+        [0x01010101_00000000, 0x01010101_00000001],
+        [0x02020202_00000000, 0x02020202_00000001],
+        [0x03030303_00000000, 0x03030303_00000001],
+    ]
+
+    gap_sentinel = 0xDEADBEEF_12345678
+    await ext_write(dut, ext_base + row_bytes, gap_sentinel)
+
+    for r in range(rows):
+        for w, val in enumerate(pattern[r]):
+            await sram_write(dut, sram_base + r * sram_stride + w * 8, val)
+
+    await start_dma(
+        dut, OP_DMA_ST, ext_base, sram_base, row_bytes,
+        row_count=rows,
+        row_bytes=row_bytes,
+        ext_stride=ext_stride,
+        sram_stride=sram_stride,
+    )
+
+    for r in range(rows):
+        for w, expected in enumerate(pattern[r]):
+            actual = await ext_read(dut, ext_base + r * ext_stride + w * 8)
+            assert actual == expected, (
+                f"2D ExtMem row {r} word {w}: expected 0x{expected:016x}, "
+                f"got 0x{actual:016x}"
+            )
+
+    gap = await ext_read(dut, ext_base + row_bytes)
+    assert gap == gap_sentinel, "2D store overwrote the first external stride gap"
+
+    dut._log.info(
+        f"test_dma_2d_store_strided PASS: rows={rows}, row_bytes={row_bytes}, "
+        f"ext_stride={ext_stride}, sram_stride={sram_stride}"
+    )

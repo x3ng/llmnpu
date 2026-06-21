@@ -96,10 +96,11 @@ static int _dma_xfer(npu_dev_t *d,
     return _wait_not_busy(d, DMA_TIMEOUT_LOOPS);
 }
 
-static int _dma_2d_ld(npu_dev_t *d,
-                      uint32_t ext_addr, uint32_t sram_off,
-                      uint32_t rows, uint32_t row_bytes,
-                      uint32_t ext_stride, uint32_t sram_stride)
+static int _dma_2d_xfer(npu_dev_t *d,
+                        uint32_t ext_addr, uint32_t sram_off,
+                        uint32_t rows, uint32_t row_bytes,
+                        uint32_t ext_stride, uint32_t sram_stride,
+                        int is_st)
 {
     if (rows == 0 || row_bytes == 0) return -1;
     if (rows > 0xFFFFu || row_bytes > 0xFFFFu) return -1;
@@ -116,6 +117,7 @@ static int _dma_2d_ld(npu_dev_t *d,
            (row_bytes & 0xFFFFu) | ((rows & 0xFFFFu) << 16));
     csr_wr(d, CSR_DMA_CSR3,
            DMA_CSR3_START | DMA_CSR3_MODE_2D |
+           (is_st ? DMA_CSR3_DIR_ST : 0u) |
            DMA_CSR3_EXT_STRIDE(ext_stride));
 
     if (_wait_started_or_done(d, DMA_START_TIMEOUT_LOOPS) != 0) return -1;
@@ -212,8 +214,16 @@ int npu_dma_2d_ld(npu_dev_t *d, uint32_t ext_addr, uint32_t sram_off,
                   uint32_t rows, uint32_t row_bytes,
                   uint32_t ext_stride, uint32_t sram_stride)
 {
-    return _dma_2d_ld(d, ext_addr, sram_off, rows, row_bytes,
-                      ext_stride, sram_stride);
+    return _dma_2d_xfer(d, ext_addr, sram_off, rows, row_bytes,
+                        ext_stride, sram_stride, 0);
+}
+
+int npu_dma_2d_st(npu_dev_t *d, uint32_t ext_addr, uint32_t sram_off,
+                  uint32_t rows, uint32_t row_bytes,
+                  uint32_t ext_stride, uint32_t sram_stride)
+{
+    return _dma_2d_xfer(d, ext_addr, sram_off, rows, row_bytes,
+                        ext_stride, sram_stride, 1);
 }
 
 int npu_run_program(npu_dev_t *d, const void *image, size_t n,

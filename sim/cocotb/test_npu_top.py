@@ -32,6 +32,10 @@ CSR_CTRL      = 0x00
 CSR_STATUS    = 0x01
 CSR_PC        = 0x02
 CSR_DESC_PTR  = 0x04
+CSR_DMA_CSR0  = 0x08
+CSR_DMA_CSR1  = 0x0A
+CSR_DMA_CSR2  = 0x0C
+CSR_DMA_CSR3  = 0x0E
 CSR_IRQ_EN    = 0x10
 CSR_IRQ_STAT  = 0x11
 CSR_DEBUG     = 0x18
@@ -39,6 +43,10 @@ CSR_PERF_CYC  = 0x20
 
 OP_GEMM       = 0x01
 OP_ACT_RELU   = 0x20
+
+DMA_CSR3_START   = 1 << 0
+DMA_CSR3_DIR_ST  = 1 << 1
+DMA_CSR3_MODE_2D = 1 << 2
 
 DEBUG_GPL_STATE_SHIFT = 5
 DEBUG_GPL_STATE_MASK = 0x7 << DEBUG_GPL_STATE_SHIFT
@@ -132,6 +140,18 @@ def wsram_write_word(dut, byte_addr, value):
 def osram_read_word(dut, byte_addr):
     word_idx = (byte_addr - OSRAM_BASE) >> 2
     return int(dut.u_crossbar.u_osram.mem[word_idx].value) & 0xFFFFFFFF
+
+
+def osram_write_word(dut, byte_addr, value):
+    word_idx = (byte_addr - OSRAM_BASE) >> 2
+    dut.u_crossbar.u_osram.mem[word_idx].value = value & 0xFFFFFFFF
+
+
+def dma_sram_read_word(dut, byte_addr):
+    result = 0
+    for i in range(4):
+        result |= (int(dut.u_dma.sram[byte_addr + i].value) & 0xFF) << (8 * i)
+    return result
 
 
 async def setup_dut(dut):
@@ -419,6 +439,72 @@ async def test_csr_gemm_k2_computes_from_descriptor(dut):
         f"total={len(mismatches)}"
     )
     dut._log.info("PASS: CSR GEMM K=2 descriptor applies zp, scale, and ReLU")
+
+
+@cocotb.test()
+async def test_csr_dma_2d_store_prefill_strided(dut):
+    """CSR 2D STORE bridge prefill reads NPU SRAM with row stride."""
+    await setup_dut(dut)
+
+    dut.rst_n.value = 1
+    await RisingEdge(dut.clk)
+    await Timer(1, unit="ps")
+
+    await csr_write(dut, CSR_CTRL, 0x00000002)
+    for i in range(4):
+        await if_load(dut, i, 0xFF000000)
+    await csr_write(dut, CSR_CTRL, 0x00000000)
+    await ClockCycles(dut.clk, 2)
+
+    rows = 3
+    row_bytes = 8
+    sram_stride = 16
+    ext_stride = 24
+    sram_base = OSRAM_BASE
+    pattern = [
+        0x11111111_00000000,
+        0x22222222_00000000,
+        0x33333333_00000000,
+    ]
+
+    for r, value in enumerate(pattern):
+        osram_write_word(dut, sram_base + r * sram_stride + 0, value & 0xFFFFFFFF)
+        osram_write_word(dut, sram_base + r * sram_stride + 4, value >> 32)
+
+    await csr_write(dut, CSR_DMA_CSR0, 0x00000800)
+    await csr_write(dut, CSR_DMA_CSR1,
+                    ((sram_stride & 0xFFFF) << 16) | (sram_base & 0xFFFF))
+    await csr_write(dut, CSR_DMA_CSR2,
+                    ((rows & 0xFFFF) << 16) | (row_bytes & 0xFFFF))
+    await csr_write(dut, CSR_DMA_CSR3,
+                    ((ext_stride & 0xFFFF) << 16) |
+                    DMA_CSR3_MODE_2D | DMA_CSR3_DIR_ST | DMA_CSR3_START)
+
+    busy_seen = False
+    idle_seen = False
+    for _ in range(400):
+        await RisingEdge(dut.clk)
+        await Timer(1, unit="ps")
+        busy = (await csr_read(dut, CSR_STATUS)) & 1
+        if busy:
+            busy_seen = True
+        if busy_seen and not busy:
+            idle_seen = True
+            break
+
+    assert busy_seen, "2D STORE never entered busy state"
+    assert idle_seen, "2D STORE did not finish"
+
+    for r, value in enumerate(pattern):
+        got_lo = dma_sram_read_word(dut, sram_base + r * sram_stride + 0)
+        got_hi = dma_sram_read_word(dut, sram_base + r * sram_stride + 4)
+        got = got_lo | (got_hi << 32)
+        assert got == value, (
+            f"2D STORE prefill row {r}: expected 0x{value:016X}, "
+            f"got 0x{got:016X}"
+        )
+
+    dut._log.info("PASS: CSR DMA 2D STORE bridge prefill uses SRAM stride")
 
 
 @cocotb.test()
