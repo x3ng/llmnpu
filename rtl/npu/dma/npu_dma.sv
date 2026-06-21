@@ -4,12 +4,12 @@
 // Coordinates 1D/2D data transfers between external memory and
 // NPU SRAM.  Wraps axi_dma_wrapper (proper AXI DMA engine).
 //
-// FSM: IDLE → XFER → DONE
+// FSM: IDLE → ROW_START → XFER → ROW_GAP/DONE
 //
 // Feature set (initial version):
 //   - 1D linear LOAD (OP_DMA_LD)  ext→sram
 //   - 1D linear STORE (OP_DMA_ST) sram→ext
-//   - 2D placeholder (OP_DMA_2D)  treated as 1D LOAD
+//   - 2D LOAD with row bytes and external/SRAM strides
 //   - Ping-pong buffer coordination via bank flip
 // ============================================================
 
@@ -28,6 +28,10 @@ module npu_dma #(
     input  logic [31:0] ext_addr,
     input  logic [15:0] sram_addr,
     input  logic [15:0] length,
+    input  logic [15:0] row_count,
+    input  logic [15:0] row_bytes,
+    input  logic [15:0] ext_stride,
+    input  logic [15:0] sram_stride,
 
     // Status
     output logic        busy,
@@ -127,20 +131,35 @@ module npu_dma #(
     reg [1:0]  r_mode;
     reg [31:0] r_ext_addr;
     reg [15:0] r_sram_addr;
-    reg [15:0] r_length;
+    reg [15:0] r_row_count;
+    reg [15:0] r_row_bytes;
+    reg [15:0] r_ext_stride;
+    reg [15:0] r_sram_stride;
+    reg [15:0] row_idx;
     reg [15:0] xfer_cnt;
-    reg [15:0] total_words;     // length / 8
+
+    logic [31:0] cur_sram_base;
+    logic [31:0] cur_ext_addr;
+    logic [15:0] cur_sram_addr;
+
+    always_comb begin
+        cur_sram_base = {16'd0, r_sram_addr}
+                      + ({16'd0, row_idx} * {16'd0, r_sram_stride});
+        cur_ext_addr  = r_ext_addr
+                      + ({16'd0, row_idx} * {16'd0, r_ext_stride});
+        cur_sram_addr = cur_sram_base[15:0] + xfer_cnt;
+    end
 
     // wr_data driven combinationally from sram — avoids NBA race
     // with wrapper's capture cycle.
-    assign wrapper_wr_data[7:0]   = (r_mode == 2'b10) ? sram[r_sram_addr + xfer_cnt  ] : 8'd0;
-    assign wrapper_wr_data[15:8]  = (r_mode == 2'b10) ? sram[r_sram_addr + xfer_cnt+1] : 8'd0;
-    assign wrapper_wr_data[23:16] = (r_mode == 2'b10) ? sram[r_sram_addr + xfer_cnt+2] : 8'd0;
-    assign wrapper_wr_data[31:24] = (r_mode == 2'b10) ? sram[r_sram_addr + xfer_cnt+3] : 8'd0;
-    assign wrapper_wr_data[39:32] = (r_mode == 2'b10) ? sram[r_sram_addr + xfer_cnt+4] : 8'd0;
-    assign wrapper_wr_data[47:40] = (r_mode == 2'b10) ? sram[r_sram_addr + xfer_cnt+5] : 8'd0;
-    assign wrapper_wr_data[55:48] = (r_mode == 2'b10) ? sram[r_sram_addr + xfer_cnt+6] : 8'd0;
-    assign wrapper_wr_data[63:56] = (r_mode == 2'b10) ? sram[r_sram_addr + xfer_cnt+7] : 8'd0;
+    assign wrapper_wr_data[7:0]   = (r_mode == 2'b10) ? sram[cur_sram_addr  ] : 8'd0;
+    assign wrapper_wr_data[15:8]  = (r_mode == 2'b10) ? sram[cur_sram_addr+1] : 8'd0;
+    assign wrapper_wr_data[23:16] = (r_mode == 2'b10) ? sram[cur_sram_addr+2] : 8'd0;
+    assign wrapper_wr_data[31:24] = (r_mode == 2'b10) ? sram[cur_sram_addr+3] : 8'd0;
+    assign wrapper_wr_data[39:32] = (r_mode == 2'b10) ? sram[cur_sram_addr+4] : 8'd0;
+    assign wrapper_wr_data[47:40] = (r_mode == 2'b10) ? sram[cur_sram_addr+5] : 8'd0;
+    assign wrapper_wr_data[55:48] = (r_mode == 2'b10) ? sram[cur_sram_addr+6] : 8'd0;
+    assign wrapper_wr_data[63:56] = (r_mode == 2'b10) ? sram[cur_sram_addr+7] : 8'd0;
 
     // --------------------------------------------------------
     // Wrapper instantiation — proper AXI DMA
@@ -202,12 +221,14 @@ module npu_dma #(
     assign pp_ready = ~busy;
 
     // --------------------------------------------------------
-    // DMA FSM — IDLE → XFER → DONE
+    // DMA FSM — IDLE → ROW_START → XFER → ROW_GAP/DONE
     // --------------------------------------------------------
-    typedef enum logic [1:0] {
-        S_IDLE = 2'b00,
-        S_XFER = 2'b01,
-        S_DONE = 2'b10
+    typedef enum logic [2:0] {
+        S_IDLE      = 3'd0,
+        S_ROW_START = 3'd1,
+        S_XFER      = 3'd2,
+        S_ROW_GAP   = 3'd3,
+        S_DONE      = 3'd4
     } state_t;
 
     state_t state, next;
@@ -220,9 +241,12 @@ module npu_dma #(
             r_mode        <= 2'd0;
             r_ext_addr    <= 32'd0;
             r_sram_addr   <= 16'd0;
-            r_length      <= 16'd0;
+            r_row_count   <= 16'd1;
+            r_row_bytes   <= 16'd0;
+            r_ext_stride  <= 16'd0;
+            r_sram_stride <= 16'd0;
+            row_idx       <= 16'd0;
             xfer_cnt      <= 16'd0;
-            total_words   <= 16'd0;
         end else begin
             state <= next;
 
@@ -233,8 +257,7 @@ module npu_dma #(
                     if (start) begin
                         r_ext_addr  <= ext_addr;
                         r_sram_addr <= sram_addr;
-                        r_length    <= length;
-                        total_words <= length[15:3];  // bytes / 8
+                        row_idx     <= 16'd0;
                         xfer_cnt    <= 16'd0;
 
                         // Decode opcode → wrapper mode
@@ -245,12 +268,25 @@ module npu_dma #(
                             default:     r_mode <= 2'b00;
                         endcase
 
-                        // Arm wrapper
-                        wrapper_start     <= 1'b1;
-                        wrapper_mode      <= (opcode == `OP_DMA_ST) ? 2'b10 : 2'b01;
-                        wrapper_ext_addr  <= ext_addr;
-                        wrapper_length    <= length;
+                        if (opcode == `OP_DMA_2D) begin
+                            r_row_count   <= (row_count == 16'd0) ? 16'd1 : row_count;
+                            r_row_bytes   <= row_bytes;
+                            r_ext_stride  <= (ext_stride == 16'd0) ? row_bytes : ext_stride;
+                            r_sram_stride <= (sram_stride == 16'd0) ? row_bytes : sram_stride;
+                        end else begin
+                            r_row_count   <= 16'd1;
+                            r_row_bytes   <= length;
+                            r_ext_stride  <= length;
+                            r_sram_stride <= length;
+                        end
                     end
+                end
+
+                S_ROW_START: begin
+                    wrapper_start    <= 1'b1;
+                    wrapper_mode     <= r_mode;
+                    wrapper_ext_addr <= cur_ext_addr;
+                    wrapper_length   <= r_row_bytes;
                 end
 
                 S_XFER: begin
@@ -260,14 +296,14 @@ module npu_dma #(
                         // LOAD: capture wrapper rd_data into SRAM
                         // when rd_valid is asserted
                         if (wrapper_rd_valid) begin
-                            sram[r_sram_addr + xfer_cnt  ] <= wrapper_rd_data[7:0];
-                            sram[r_sram_addr + xfer_cnt+1] <= wrapper_rd_data[15:8];
-                            sram[r_sram_addr + xfer_cnt+2] <= wrapper_rd_data[23:16];
-                            sram[r_sram_addr + xfer_cnt+3] <= wrapper_rd_data[31:24];
-                            sram[r_sram_addr + xfer_cnt+4] <= wrapper_rd_data[39:32];
-                            sram[r_sram_addr + xfer_cnt+5] <= wrapper_rd_data[47:40];
-                            sram[r_sram_addr + xfer_cnt+6] <= wrapper_rd_data[55:48];
-                            sram[r_sram_addr + xfer_cnt+7] <= wrapper_rd_data[63:56];
+                            sram[cur_sram_addr  ] <= wrapper_rd_data[7:0];
+                            sram[cur_sram_addr+1] <= wrapper_rd_data[15:8];
+                            sram[cur_sram_addr+2] <= wrapper_rd_data[23:16];
+                            sram[cur_sram_addr+3] <= wrapper_rd_data[31:24];
+                            sram[cur_sram_addr+4] <= wrapper_rd_data[39:32];
+                            sram[cur_sram_addr+5] <= wrapper_rd_data[47:40];
+                            sram[cur_sram_addr+6] <= wrapper_rd_data[55:48];
+                            sram[cur_sram_addr+7] <= wrapper_rd_data[63:56];
                             xfer_cnt <= xfer_cnt + 16'd8;
                         end
                     end else if (r_mode == 2'b10) begin
@@ -277,6 +313,15 @@ module npu_dma #(
                             xfer_cnt <= xfer_cnt + 16'd8;
                         end
                     end
+
+                    if (wrapper_done && (row_idx + 16'd1 < r_row_count)) begin
+                        row_idx  <= row_idx + 16'd1;
+                        xfer_cnt <= 16'd0;
+                    end
+                end
+
+                S_ROW_GAP: begin
+                    wrapper_start <= 1'b0;
                 end
 
                 S_DONE: begin
@@ -305,9 +350,19 @@ module npu_dma #(
     always_comb begin
         next = state;
         case (state)
-            S_IDLE: if (start)               next = S_XFER;
-            S_XFER: if (wrapper_done)        next = S_DONE;
-            S_DONE: if (~start)              next = S_IDLE;
+            S_IDLE: if (start) next = S_ROW_START;
+            S_ROW_START: next = S_XFER;
+            S_XFER: begin
+                if (wrapper_done) begin
+                    if (row_idx + 16'd1 >= r_row_count)
+                        next = S_DONE;
+                    else
+                        next = S_ROW_GAP;
+                end
+            end
+            S_ROW_GAP: next = S_ROW_START;
+            S_DONE: if (~start) next = S_IDLE;
+            default: next = S_IDLE;
         endcase
     end
 

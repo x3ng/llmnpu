@@ -57,6 +57,10 @@ async def start_dma(dut, opcode, ext_addr, sram_addr, length):
     dut.ext_addr.value = ext_addr
     dut.sram_addr.value = sram_addr
     dut.length.value = length
+    dut.row_count.value = 1
+    dut.row_bytes.value = length
+    dut.ext_stride.value = length
+    dut.sram_stride.value = length
     await RisingEdge(dut.clk)
     dut.start.value = 0
 
@@ -81,6 +85,10 @@ async def test_dma_load_single(dut):
     dut.ext_addr.value = 0
     dut.sram_addr.value = 0
     dut.length.value = 0
+    dut.row_count.value = 0
+    dut.row_bytes.value = 0
+    dut.ext_stride.value = 0
+    dut.sram_stride.value = 0
     dut.sim_ext_en.value = 0
     dut.sim_ext_we.value = 0
     dut.sim_ext_addr.value = 0
@@ -135,6 +143,10 @@ async def test_dma_load_multi(dut):
     dut.ext_addr.value = 0
     dut.sram_addr.value = 0
     dut.length.value = 0
+    dut.row_count.value = 0
+    dut.row_bytes.value = 0
+    dut.ext_stride.value = 0
+    dut.sram_stride.value = 0
     dut.sim_ext_en.value = 0
     dut.sim_ext_we.value = 0
     dut.sim_ext_addr.value = 0

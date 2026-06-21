@@ -30,8 +30,13 @@ module csr (
     output logic [31:0] dma_ext_addr,
     output logic [15:0] dma_sram_addr,
     output logic [15:0] dma_length,
+    output logic [15:0] dma_row_count,
+    output logic [15:0] dma_row_bytes,
+    output logic [15:0] dma_ext_stride,
+    output logic [15:0] dma_sram_stride,
     output logic        dma_csr_start,
     output logic        dma_csr_is_store,
+    output logic        dma_csr_is_2d,
 
     // Descriptor pointer
     output logic [31:0] desc_ptr,
@@ -137,14 +142,22 @@ module csr (
     // ----------------------------------------------------------------
     // DMA CSR outputs (combinational — top samples when needed)
     // ----------------------------------------------------------------
-    // CSR0 = ext_addr, CSR1 = sram_off, CSR2 = length, CSR3 = ctrl
+    // 1D: CSR0=ext_addr, CSR1[15:0]=sram_off, CSR2[15:0]=length,
+    //     CSR3[1:0]=dir/start.
+    // 2D: CSR1[31:16]=sram_stride, CSR2[31:16]=rows,
+    //     CSR2[15:0]=row_bytes, CSR3[31:16]=ext_stride, CSR3[2]=2D.
     assign dma_ext_addr   = dma_csr0;
     assign dma_sram_addr  = dma_csr1[15:0];
     assign dma_length     = dma_csr2[15:0];
+    assign dma_row_count  = dma_csr2[31:16];
+    assign dma_row_bytes  = dma_csr2[15:0];
+    assign dma_ext_stride = dma_csr3[31:16];
+    assign dma_sram_stride= dma_csr1[31:16];
 
     // dma_csr_start: pulse when DMA_CSR3 written with bit[0] set
     assign dma_csr_start    = we && (waddr == A_DMA_CSR3) && wdata[0];
     assign dma_csr_is_store = (we && (waddr == A_DMA_CSR3)) ? wdata[1] : dma_csr3[1];
+    assign dma_csr_is_2d    = (we && (waddr == A_DMA_CSR3)) ? wdata[2] : dma_csr3[2];
 
     // desc_ptr: from CSR register for descriptor fetch
     assign desc_ptr = desc_ptr_reg;

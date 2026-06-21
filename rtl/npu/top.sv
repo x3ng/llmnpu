@@ -80,8 +80,13 @@ module npu_top #(
     logic [31:0] csr_dma_ext_addr;
     logic [15:0] csr_dma_sram_addr;
     logic [15:0] csr_dma_length;
+    logic [15:0] csr_dma_row_count;
+    logic [15:0] csr_dma_row_bytes;
+    logic [15:0] csr_dma_ext_stride;
+    logic [15:0] csr_dma_sram_stride;
     logic        csr_dma_start;
     logic        csr_dma_is_store;
+    logic        csr_dma_is_2d;
     logic [31:0] csr_desc_ptr;
     logic [7:0]  csr_issue_opcode;
 
@@ -129,8 +134,13 @@ module npu_top #(
         .dma_ext_addr    (csr_dma_ext_addr),
         .dma_sram_addr   (csr_dma_sram_addr),
         .dma_length      (csr_dma_length),
+        .dma_row_count   (csr_dma_row_count),
+        .dma_row_bytes   (csr_dma_row_bytes),
+        .dma_ext_stride  (csr_dma_ext_stride),
+        .dma_sram_stride (csr_dma_sram_stride),
         .dma_csr_start   (csr_dma_start),
         .dma_csr_is_store(csr_dma_is_store),
+        .dma_csr_is_2d   (csr_dma_is_2d),
         .desc_ptr        (csr_desc_ptr),
         .irq             (irq)
     );
@@ -339,7 +349,8 @@ module npu_top #(
 
     assign dma_opcode = dma_cmd_valid  ? dma_cmd[31:24] :
                         dma_restart    ? `OP_DMA_ST :
-                        csr_dma_start  ? (csr_dma_is_store ? `OP_DMA_ST : `OP_DMA_LD) :
+                        csr_dma_start  ? (csr_dma_is_store ? `OP_DMA_ST :
+                                          (csr_dma_is_2d ? `OP_DMA_2D : `OP_DMA_LD)) :
                         8'd0;
 
     always_ff @(posedge clk or negedge dp_rst_n) begin
@@ -371,6 +382,10 @@ module npu_top #(
         .ext_addr      (csr_dma_ext_addr),
         .sram_addr     (csr_dma_sram_addr),
         .length        (csr_dma_length),
+        .row_count     (csr_dma_row_count),
+        .row_bytes     (csr_dma_row_bytes),
+        .ext_stride    (csr_dma_ext_stride),
+        .sram_stride   (csr_dma_sram_stride),
         .busy          (dma_busy),
         .done          (dma_done),
         .pp_bank       (),
@@ -457,21 +472,39 @@ module npu_top #(
     // into DMA's internal SRAM before DMA STORE starts.
     // ================================================================
 	    logic [15:0]   dma_br_cnt;
+        logic [15:0]   dma_br_row;
 	    logic          dma_br_phase;
 	    logic          dma_br_word_active;
+        logic [15:0]   dma_br_rows;
+        logic [15:0]   dma_br_row_bytes;
+        logic [15:0]   dma_br_sram_stride;
+        logic [31:0]   dma_br_sram_addr_calc;
 
-    assign dma_br_word_active = (dma_br_cnt < csr_dma_length);
+    always_comb begin
+        dma_br_rows = (csr_dma_is_2d && csr_dma_row_count != 16'd0)
+                    ? csr_dma_row_count : 16'd1;
+        dma_br_row_bytes = csr_dma_is_2d ? csr_dma_row_bytes : csr_dma_length;
+        dma_br_sram_stride = (csr_dma_is_2d && csr_dma_sram_stride != 16'd0)
+                           ? csr_dma_sram_stride : dma_br_row_bytes;
+        dma_br_sram_addr_calc = {16'd0, csr_dma_sram_addr}
+                              + ({16'd0, dma_br_row} * {16'd0, dma_br_sram_stride})
+                              + {16'd0, dma_br_cnt};
+        dma_br_word_active = (dma_br_row < dma_br_rows) &&
+                             (dma_br_cnt < dma_br_row_bytes);
+    end
 
     always_ff @(posedge clk or negedge dp_rst_n) begin
 	        if (!dp_rst_n) begin
 	            dma_br_state <= DMA_BR_IDLE;
 	            dma_br_cnt   <= 16'd0;
+                dma_br_row   <= 16'd0;
 	            dma_br_phase <= 1'b0;
 	        end else begin
 	            dma_br_state <= dma_br_next;
 	            case (dma_br_state)
 	                DMA_BR_IDLE: begin
 	                    dma_br_cnt <= 16'd0;
+                        dma_br_row <= 16'd0;
 	                    dma_br_phase <= 1'b0;
 	                end
 	                DMA_BR_PREFILL: begin
@@ -481,7 +514,12 @@ module npu_top #(
 	                        if (xbar_m0_grant)
 	                            dma_br_phase <= 1'b1;
 	                    end else begin
-	                        dma_br_cnt <= dma_br_cnt + 16'd4;
+                            if (dma_br_cnt + 16'd4 >= dma_br_row_bytes) begin
+                                dma_br_cnt <= 16'd0;
+                                dma_br_row <= dma_br_row + 16'd1;
+                            end else begin
+	                            dma_br_cnt <= dma_br_cnt + 16'd4;
+                            end
 	                        dma_br_phase <= 1'b0;
 	                    end
                 end
@@ -491,7 +529,12 @@ module npu_top #(
                     end else if (!dma_br_phase) begin
                         dma_br_phase <= 1'b1;
                     end else if (xbar_m0_grant) begin
-                        dma_br_cnt <= dma_br_cnt + 16'd4;
+                        if (dma_br_cnt + 16'd4 >= dma_br_row_bytes) begin
+                            dma_br_cnt <= 16'd0;
+                            dma_br_row <= dma_br_row + 16'd1;
+                        end else begin
+                            dma_br_cnt <= dma_br_cnt + 16'd4;
+                        end
                         dma_br_phase <= 1'b0;
                     end
                 end
@@ -509,11 +552,11 @@ module npu_top #(
                     dma_br_next = DMA_BR_PREFILL;
             end
             DMA_BR_COPY: begin
-                if (dma_br_cnt >= csr_dma_length)
+                if (dma_br_row >= dma_br_rows)
                     dma_br_next = DMA_BR_IDLE;
             end
             DMA_BR_PREFILL: begin
-                if (dma_br_cnt >= csr_dma_length)
+                if (dma_br_row >= dma_br_rows)
                     dma_br_next = DMA_BR_IDLE;
             end
         endcase
@@ -523,14 +566,14 @@ module npu_top #(
                                 (((dma_br_state == DMA_BR_COPY) && !dma_br_phase) ||
                                  ((dma_br_state == DMA_BR_PREFILL) && dma_br_phase));
     assign dma_sim_sram_we   = (dma_br_state == DMA_BR_PREFILL) && dma_br_phase;
-    assign dma_sim_sram_addr = csr_dma_sram_addr + dma_br_cnt;
+    assign dma_sim_sram_addr = dma_br_sram_addr_calc[15:0];
 	    assign dma_sim_sram_wdata= (dma_br_state == DMA_BR_PREFILL) ? {32'd0, xbar_m0_rdata} : 64'd0;
 
     // M0 (DMA) driven by bridge FSM
 	    assign m0_req   = dma_br_word_active &&
 	                      (((dma_br_state == DMA_BR_COPY) && dma_br_phase) ||
 	                       (dma_br_state == DMA_BR_PREFILL));
-    assign m0_addr  = csr_dma_sram_addr + dma_br_cnt;
+    assign m0_addr  = dma_br_sram_addr_calc[15:0];
     assign m0_wdata = (dma_br_state == DMA_BR_COPY) ? dma_sim_sram_rdata[31:0] : 32'd0;
     assign m0_wen   = (dma_br_state == DMA_BR_COPY) && dma_br_phase;
 

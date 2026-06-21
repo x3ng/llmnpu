@@ -35,6 +35,12 @@ int npu_dma_ld(npu_dev_t *d, uint32_t ext_addr, uint32_t sram_off,
 int npu_dma_st(npu_dev_t *d, uint32_t ext_addr, uint32_t sram_off,
                uint32_t len);
 
+// 2D DMA load: copy rows of row_bytes from external memory to NPU SRAM.
+// ext_stride and sram_stride are byte strides between row starts.
+int npu_dma_2d_ld(npu_dev_t *d, uint32_t ext_addr, uint32_t sram_off,
+                  uint32_t rows, uint32_t row_bytes,
+                  uint32_t ext_stride, uint32_t sram_stride);
+
 // Issue a compute operation: write desc_ptr to CSR_DESC_PTR and
 // pulse CSR_CTRL.START.  opcode is available for future dispatch
 // (currently reserved).  Returns 0 on success, -1 if the NPU is

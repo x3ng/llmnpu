@@ -41,12 +41,14 @@
 // reported through CSR_STATUS.BUSY/IRQ_STAT, not CSR3 status bits.
 #define DMA_CSR3_START    (1u << 0)
 #define DMA_CSR3_DIR_ST   (1u << 1)   // 0=load (ext→SRAM), 1=store (SRAM→ext)
+#define DMA_CSR3_MODE_2D  (1u << 2)
+#define DMA_CSR3_EXT_STRIDE(stride) (((uint32_t)(stride) & 0xFFFFu) << 16)
 
 // --- DMA CSR register roles ---
 // CSR0 : external AXI address
-// CSR1 : SRAM byte offset
-// CSR2 : transfer length (bytes)
-// CSR3 : control
+// CSR1 : [15:0] SRAM byte offset, [31:16] 2D SRAM stride
+// CSR2 : [15:0] transfer length / 2D row bytes, [31:16] 2D rows
+// CSR3 : control, [31:16] 2D external stride
 
 // --- IRQ bits (IRQ_EN and IRQ_STAT share layout) ---
 #define IRQ_DONE          (1u << 0)
