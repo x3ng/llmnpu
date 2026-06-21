@@ -41,7 +41,7 @@
 // GEMM IF/ID instruction descriptor reference:
 //   [31:24] opcode (`OP_GEMM or `OP_GEMM_SCALE)
 //   [23:8]  descriptor word offset from CSR_DESC_PTR
-//   [7:0]   legacy K count / auxiliary field
+//   [7:0]   auxiliary field
 typedef struct packed {
     logic [15:0] M, N, K;        // tile counts (each x16)
                                   // RTL issue path consumes one M/N tile;

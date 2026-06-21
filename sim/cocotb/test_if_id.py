@@ -5,6 +5,7 @@ Tests:
   2. Decode I-type DMA_LD instruction (0x400AAAAA)
   3. Dispatch GEMM->VADD->RELU sequence, verify routing to correct units
   4. SYNC instruction asserts stall_if when units report busy
+  5. WFI halts fetch/dispatch
 """
 
 import cocotb
@@ -238,3 +239,27 @@ async def test_sync_stall(dut):
         "Test 4: stall_if should be 0 when SYNC and no busy sources"
 
     dut._log.info("PASS: Test 4 SYNC stall_if=1 when busy, de-asserts when idle")
+
+
+@cocotb.test()
+async def test_wfi_halts_dispatch(dut):
+    """WFI stops the IF/ID stream; later instructions must not dispatch."""
+    await setup_reset(dut)
+
+    await load_instrs(dut, [
+        0xF1000000,  # WFI
+        0x01020304,  # GEMM must not dispatch after WFI
+    ])
+
+    dut.rst_n.value = 1
+    await Timer(1, unit='ns')
+
+    for _ in range(8):
+        await RisingEdge(dut.clk)
+        await ReadOnly()
+        assert not int(dut.gemm_cmd_valid.value), \
+            "GEMM dispatched after WFI halted the IF/ID stream"
+        await Timer(1, unit='ns')
+
+    assert int(dut.stall_if.value), "WFI should hold stall_if high after halt"
+    dut._log.info("PASS: Test 5 WFI halts fetch/dispatch")

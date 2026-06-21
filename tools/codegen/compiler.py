@@ -22,7 +22,7 @@ from .serialize import (
     NpuInstruction,
     Opcode,
     VOpt,
-    GEMM_DESCRIPTOR_SIZE,
+    GEMM_DESCRIPTOR_SLOT_SIZE,
     build_gemm_descriptor,
 )
 
@@ -33,7 +33,7 @@ def _ceil_div(a: int, b: int) -> int:
     return (a + b - 1) // b
 
 
-GEMM_DESCRIPTOR_WORDS = (GEMM_DESCRIPTOR_SIZE + 3) // 4
+GEMM_DESCRIPTOR_WORDS = GEMM_DESCRIPTOR_SLOT_SIZE // 4
 
 
 class NpuCompiler:

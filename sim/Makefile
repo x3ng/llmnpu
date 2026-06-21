@@ -30,8 +30,8 @@ LOG_FILTER ?= PASS|FAIL|ERROR|UART|timeout|Timeout|wfi|WFI|trap|TRAP|mismatch|MI
 include $(shell cocotb-config --makefiles)/Makefile.sim
 
 .PHONY: test_pe test_gemm test_valu test_sfu test_dma test_dma_load test_memory test_if_id test_npu_top
-.PHONY: test_e2e test_e2e_csr test_e2e_boot test_e2e_gemm test_e2e_dma
-.PHONY: rebuild_e2e_gemm e2e_gemm_log e2e_dma_log e2e_boot_log e2e_csr_log e2e_log test_quick test_all clean
+.PHONY: test_e2e test_e2e_csr test_e2e_boot test_e2e_gemm test_e2e_dma test_e2e_program
+.PHONY: rebuild_e2e_gemm e2e_gemm_log e2e_dma_log e2e_boot_log e2e_csr_log e2e_program_log e2e_log test_quick test_all clean
 
 # ── Shared variables for all E2E (SoC-level) targets ──
 
@@ -253,6 +253,42 @@ test_e2e_gemm:
 			CUSTOM_COMPILE_DEPS='$(SIM_DIR)/Makefile $(E2E_RTL)' \
 		2>&1 | tee $(SIM_BUILD)/test.log
 
+test_e2e_program: SIM_BUILD = sim_build_e2e_program
+test_e2e_program: SIM = verilator
+test_e2e_program:
+	@echo "=== Reusing $(SIM_BUILD) when cocotb/Verilator dependencies are current ==="
+	@echo "=== Verilator C++ build jobs: $(VERILATOR_BUILD_JOBS) ==="
+	@mkdir -p $(REPO_ROOT)/build
+	@echo "=== Building firmware_program firmware ==="
+	riscv32-none-elf-gcc -march=rv32im -mabi=ilp32 -nostdlib -ffreestanding -O2 \
+		-I$(REPO_ROOT)/sw/driver \
+		-c $(SIM_DIR)/cocotb/firmware_program.c -o $(REPO_ROOT)/build/firmware_program.o
+	riscv32-none-elf-gcc -march=rv32im -mabi=ilp32 -nostdlib -ffreestanding -O2 \
+		-I$(REPO_ROOT)/sw/driver \
+		-c $(REPO_ROOT)/sw/driver/npu_driver.c -o $(REPO_ROOT)/build/npu_driver_program.o
+	riscv32-none-elf-gcc -march=rv32im -mabi=ilp32 -nostdlib \
+		-T $(REPO_ROOT)/sw/linker/riscv32.ld \
+		-o $(REPO_ROOT)/build/firmware_program.elf \
+		$(REPO_ROOT)/build/firmware_program.o \
+		$(REPO_ROOT)/build/npu_driver_program.o
+	riscv32-none-elf-objcopy -O binary $(REPO_ROOT)/build/firmware_program.elf $(REPO_ROOT)/build/firmware_program.bin
+	@python3 -c "import sys; data=open('$(REPO_ROOT)/build/firmware_program.bin','rb').read(); data+=b'\x00'*(-len(data)%4); [print(f'{int.from_bytes(data[i:i+4],\"little\"):08x}') for i in range(0,len(data),4)]" > $(REPO_ROOT)/build/firmware_program.hex
+	@mkdir -p $(SIM_BUILD)/sim/verilog
+	cp $(REPO_ROOT)/build/firmware_program.hex $(SIM_BUILD)/sim/verilog/firmware_program.hex
+	cp $(REPO_ROOT)/build/firmware_program.hex $(SIM_BUILD)/sim/verilog/firmware.hex
+	@printf '%s\n' '+define+HEX_FILE=\"$(SIM_BUILD)/sim/verilog/firmware_program.hex\"' > $(SIM_BUILD)/hex_def.f
+	@mkdir -p $(REPO_ROOT)/sim/verilog
+	cp $(REPO_ROOT)/build/firmware_program.hex $(REPO_ROOT)/sim/verilog/firmware.hex
+	PYTHONPATH=$(SIM_DIR)/cocotb:$$PYTHONPATH \
+	MODULE=test_e2e_program TOPLEVEL=top_soc \
+	VERILOG_SOURCES="$(E2E_RTL)" \
+	$(MAKE) SIM=verilator \
+		VERILOG_INCLUDE_DIRS='$(E2E_VERILATOR_INCLUDE_DIRS)' \
+		EXTRA_ARGS='$(GEMM_EXTRA_ARGS) $(E2E_VERILATOR_EXTRA_ARGS)' \
+		BUILD_ARGS='$(GEMM_BUILD_ARGS)' \
+		CUSTOM_COMPILE_DEPS='$(SIM_DIR)/Makefile $(E2E_RTL)' \
+		2>&1 | tee $(SIM_BUILD)/test.log
+
 rebuild_e2e_gemm:
 	@echo "=== Removing sim_build_e2e_gemm for an explicit Verilator rebuild ==="
 	rm -rf sim_build_e2e_gemm
@@ -306,6 +342,9 @@ e2e_dma_log:
 
 e2e_gemm_log:
 	$(call show_log,sim_build_e2e_gemm/test.log)
+
+e2e_program_log:
+	$(call show_log,sim_build_e2e_program/test.log)
 
 e2e_log:
 	$(call show_log,sim_build_e2e/test.log)

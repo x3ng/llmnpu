@@ -10,6 +10,7 @@
 
 // --- NPU MMIO base address ---
 #define NPU_CSR_BASE  0x10000000u
+#define NPU_ISRAM_BASE 0x10010000u
 
 // --- Register byte offsets (32-bit registers) ---
 #define CSR_CTRL         0x00
@@ -61,5 +62,10 @@
 #define DSRAM_BASE  0x3000u
 
 #define DSRAM_SIZE  57344u
+
+#define NPU_PROGRAM_MAGIC   0x4355504Eu  // "NPUC" little-endian
+#define NPU_PROGRAM_VERSION 1u
+#define NPU_MAX_IFID_INSTR  4u
+#define NPU_DESC_SLOT_SIZE  20u
 
 #endif // NPU_CSR_H

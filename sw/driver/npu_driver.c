@@ -26,6 +26,10 @@ static uint32_t _dsram_next = DSRAM_BASE;
 #define DESC_BOUNCE_SIZE 256u
 static uint8_t _desc_bounce[DESC_BOUNCE_SIZE] __attribute__((aligned(8)));
 
+#define PROGRAM_DESC_BOUNCE_SIZE 512u
+static uint8_t _program_desc_bounce[PROGRAM_DESC_BOUNCE_SIZE]
+    __attribute__((aligned(8)));
+
 // ------------------------------------------------------------------
 // DMA transfer timeout (busy-loop iterations)
 // ------------------------------------------------------------------
@@ -47,6 +51,19 @@ static int _wait_started_or_done(npu_dev_t *d, uint32_t loops)
         if (status & (CSR_STATUS_BUSY | CSR_STATUS_IRQ_PEND)) return 0;
         if (--loops == 0) return -1;
     }
+}
+
+static uint32_t _load_le32(const uint8_t *p)
+{
+    return ((uint32_t)p[0]) |
+           ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) |
+           ((uint32_t)p[3] << 24);
+}
+
+static void _mem_fence(void)
+{
+    __asm__ volatile ("fence" ::: "memory");
 }
 
 static int _dma_xfer(npu_dev_t *d,
@@ -123,10 +140,20 @@ static void _busy_wait_us(uint32_t us)
 
 void npu_init(npu_dev_t *d, uintptr_t mmio_base)
 {
-    d->mmio_base = mmio_base;
+    volatile uint32_t *isram;
 
-    // Pulse RESET
+    d->mmio_base = mmio_base;
+    isram = (volatile uint32_t *)NPU_ISRAM_BASE;
+
+    // Hold the datapath in reset while installing a default WFI program.
+    // Normal CSR-driven runtime paths do not use IF/ID, so the local
+    // instruction stream must be quiescent after reset.
     csr_wr(d, CSR_CTRL, CSR_CTRL_RESET);
+    isram[0] = 0xF1000000u;  // WFI
+    isram[1] = 0xFF000000u;  // NOP padding
+    isram[2] = 0xFF000000u;
+    isram[3] = 0xFF000000u;
+    _mem_fence();
     _busy_wait_us(100);
     csr_wr(d, CSR_CTRL, 0);
     _busy_wait_us(100);
@@ -187,6 +214,68 @@ int npu_dma_2d_ld(npu_dev_t *d, uint32_t ext_addr, uint32_t sram_off,
 {
     return _dma_2d_ld(d, ext_addr, sram_off, rows, row_bytes,
                       ext_stride, sram_stride);
+}
+
+int npu_run_program(npu_dev_t *d, const void *image, size_t n,
+                    uint32_t timeout_us)
+{
+    const uint8_t *bytes = (const uint8_t *)image;
+    volatile uint32_t *isram = (volatile uint32_t *)NPU_ISRAM_BASE;
+    uint32_t num_instr;
+    uint32_t num_desc;
+    uint32_t instr_bytes;
+    uint32_t desc_off;
+    uint32_t desc_bytes;
+    uint32_t desc_aligned;
+    uint32_t desc_base = DSRAM_BASE;
+
+    if (image == 0 || n < 16u) return -1;
+    if (_load_le32(bytes + 0) != NPU_PROGRAM_MAGIC) return -2;
+    if (_load_le32(bytes + 4) != NPU_PROGRAM_VERSION) return -3;
+
+    num_instr = _load_le32(bytes + 8);
+    num_desc  = _load_le32(bytes + 12);
+    if (num_instr == 0 || num_instr > NPU_MAX_IFID_INSTR) return -4;
+
+    instr_bytes = num_instr * 4u;
+    desc_off = 16u + instr_bytes;
+    desc_bytes = num_desc * NPU_DESC_SLOT_SIZE;
+    if (desc_off > n || desc_bytes > n - desc_off) return -5;
+
+    desc_aligned = (desc_bytes + 7u) & ~7u;
+    if (desc_aligned > PROGRAM_DESC_BOUNCE_SIZE) return -6;
+    if (_dsram_next + desc_aligned > DSRAM_BASE + DSRAM_SIZE) return -7;
+
+    if (desc_aligned != 0u) {
+        desc_base = _dsram_next;
+        for (uint32_t i = 0; i < desc_aligned; i++)
+            _program_desc_bounce[i] = 0;
+        for (uint32_t i = 0; i < desc_bytes; i++)
+            _program_desc_bounce[i] = bytes[desc_off + i];
+
+        if (_dma_xfer(d, (uint32_t)(uintptr_t)_program_desc_bounce,
+                      desc_base, desc_aligned, 0) != 0)
+            return -8;
+
+        _dsram_next += desc_aligned;
+    }
+
+    if (_wait_not_busy(d, DMA_TIMEOUT_LOOPS) != 0) return -9;
+
+    csr_wr(d, CSR_CTRL, CSR_CTRL_RESET);
+    _mem_fence();
+
+    for (uint32_t i = 0; i < num_instr; i++)
+        isram[i] = _load_le32(bytes + 16u + i * 4u);
+    for (uint32_t i = num_instr; i < NPU_MAX_IFID_INSTR; i++)
+        isram[i] = 0xFF000000u;
+    _mem_fence();
+
+    csr_wr(d, CSR_IRQ_STAT, IRQ_DONE);
+    csr_wr(d, CSR_DESC_PTR, desc_base);
+    csr_wr(d, CSR_CTRL, 0u);
+
+    return npu_wait_done(d, timeout_us);
 }
 
 int npu_issue(npu_dev_t *d, uint8_t opcode, uint32_t desc_ptr)

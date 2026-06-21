@@ -203,8 +203,8 @@ module npu_top #(
 
     assign csr_gemm_start   = csr_start && (csr_issue_opcode == `OP_GEMM);
     assign if_gemm_desc_start = gemm_cmd_valid &&
-                                ((gemm_cmd[31:24] == `OP_GEMM_SCALE) ||
-                                 (gemm_cmd[23:8] != 16'd0));
+                                ((gemm_cmd[31:24] == `OP_GEMM) ||
+                                 (gemm_cmd[31:24] == `OP_GEMM_SCALE));
     assign gemm_issue_valid = gemm_cmd_valid || csr_gemm_start;
     assign gemm_issue_cmd   = csr_gemm_start ? {`OP_GEMM, 16'd0, 8'd16} : gemm_cmd;
     assign gemm_issue_desc_fetch = csr_gemm_start || if_gemm_desc_start;

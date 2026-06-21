@@ -11,7 +11,7 @@ Binary layout of a .npu file:
 | 8        | 4        | num_instr    uint32 LE                  |
 | 12       | 4        | num_desc     uint32 LE                  |
 | 16       | N*4      | instrs[]     NpuInstruction.encode()    |
-| 16+N*4   | M*19     | descs[]      gemm_desc_t (19 bytes)     |
+| 16+N*4   | M*20     | descs[]      gemm_desc_t + pad byte     |
 +──────────+──────────+────────────────────────────────────────+
 """
 
@@ -90,9 +90,7 @@ class NpuInstruction:
         [19:0]   IMM      20-bit immediate
     """
     opcode: Opcode = Opcode.NOP
-    desc_ptr: int = 0       # descriptor table index (metadata, **not** encoded
-                            # in the 32-bit word — stored in the binary
-                            # descriptor section)
+    desc_ptr: int = 0       # descriptor word offset from CSR_DESC_PTR for GEMM
     dst: int = 0
     src_a: int = 0
     src_b: int = 0
@@ -127,6 +125,7 @@ class NpuInstruction:
 # ── GEMM descriptor ──────────────────────────────────────────────────────
 
 GEMM_DESCRIPTOR_SIZE = 19
+GEMM_DESCRIPTOR_SLOT_SIZE = 20
 
 
 def build_gemm_descriptor(
@@ -188,6 +187,8 @@ class NpuGraph:
     Attributes:
         instructions: Ordered list of ``NpuInstruction``.
         descriptors:  Ordered list of 19-byte GEMM descriptor blobs.
+                      Serialized as 20-byte slots to match the RTL's
+                      five-word descriptor fetch path.
     """
     instructions: list[NpuInstruction] = field(default_factory=list)
     descriptors: list[bytes] = field(default_factory=list)
@@ -215,6 +216,10 @@ def serialize_to_binary(graph: NpuGraph, path: str | Path) -> None:
         for instr in graph.instructions:
             fh.write(instr.encode())
 
-        # Descriptor table
+        # Descriptor table.  The RTL fetches five 32-bit words per GEMM
+        # descriptor, so each 19-byte packed descriptor is padded to 20 B.
         for desc in graph.descriptors:
+            if len(desc) > GEMM_DESCRIPTOR_SLOT_SIZE:
+                raise ValueError("descriptor larger than descriptor slot")
             fh.write(desc)
+            fh.write(b"\x00" * (GEMM_DESCRIPTOR_SLOT_SIZE - len(desc)))

@@ -20,6 +20,7 @@ module if_id_top (
     reg [7:0] id_pc;
     reg [31:0] id_instr;
     reg id_valid;
+    reg halted;
 
     // Combinational fetch: pure mux via continuous assignment.
     wire [31:0] fetch_instr = (pc == 8'd0) ? imem0 :
@@ -29,20 +30,23 @@ module if_id_top (
                                32'd0;
 
     wire [7:0]  opcode   = id_instr[31:24];
-    wire target_gemm = (opcode == 8'h01);
+    wire target_gemm = (opcode == 8'h01) || (opcode == 8'h02);
     wire target_valu = (opcode == 8'h10) || (opcode == 8'h11);
     wire target_sfu  = (opcode >= 8'h20 && opcode <= 8'h23) ||
                        (opcode >= 8'h30 && opcode <= 8'h31);
     wire target_dma  = (opcode >= 8'h40 && opcode <= 8'h42);
     wire is_sync     = (opcode == 8'hF0);
+    wire is_wfi      = (opcode == 8'hF1);
 
-    wire stall_w = id_valid && (
+    wire busy_stall_w = id_valid && (
         (target_gemm && gemm_busy) ||
         (target_valu && valu_busy) ||
         (target_sfu  && sfu_busy)  ||
         (target_dma  && dma_busy)  ||
         (is_sync && (gemm_busy || valu_busy || sfu_busy || dma_busy))
     );
+    wire dispatch_wfi = id_valid && is_wfi && !halted;
+    wire stall_w = halted || busy_stall_w;
 
     // Single synchronous always block: imem write first, then reset/pipeline.
     always @(posedge clk) begin
@@ -63,6 +67,7 @@ module if_id_top (
             id_valid <= 1'b0;
             id_instr <= 32'd0;
             id_pc    <= 8'd0;
+            halted   <= 1'b0;
             stall_if <= 1'b0;
             gemm_cmd_valid <= 1'b0; gemm_cmd <= 32'd0;
             valu_cmd_valid <= 1'b0; valu_cmd <= 32'd0;
@@ -73,7 +78,7 @@ module if_id_top (
             stall_if <= stall_w;
 
             // ---- Advance pipeline when not stalled ----
-            if (!stall_w) begin
+            if (!stall_w && !dispatch_wfi) begin
                 id_instr <= fetch_instr;
                 id_pc    <= pc;
                 id_valid <= 1'b1;
@@ -84,7 +89,9 @@ module if_id_top (
             gemm_cmd_valid <= 1'b0; valu_cmd_valid <= 1'b0;
             sfu_cmd_valid  <= 1'b0; dma_cmd_valid  <= 1'b0;
 
-            if (id_valid && !stall_w) begin
+            if (dispatch_wfi) begin
+                halted <= 1'b1;
+            end else if (id_valid && !stall_w) begin
                 if (target_gemm) begin
                     gemm_cmd_valid <= 1'b1; gemm_cmd <= id_instr;
                 end else if (target_valu) begin

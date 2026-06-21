@@ -20,6 +20,7 @@ from codegen.serialize import (          # noqa: E402
     Opcode,
     VOpt,
     GEMM_DESCRIPTOR_SIZE,
+    GEMM_DESCRIPTOR_SLOT_SIZE,
     build_gemm_descriptor,
     serialize_to_binary,
 )
@@ -248,7 +249,7 @@ class TestSerialize:
             assert ver == 1
             assert ni == 2
             assert nd == 1
-            expected_size = 16 + 2 * 4 + 1 * GEMM_DESCRIPTOR_SIZE
+            expected_size = 16 + 2 * 4 + 1 * GEMM_DESCRIPTOR_SLOT_SIZE
             assert len(data) == expected_size
         finally:
             os.unlink(path)
@@ -451,6 +452,6 @@ class TestNpuTorch:
             assert ver == 1
             assert ni == 2
             assert nd == 1
-            assert len(data) == 16 + 2 * 4 + 1 * GEMM_DESCRIPTOR_SIZE
+            assert len(data) == 16 + 2 * 4 + 1 * GEMM_DESCRIPTOR_SLOT_SIZE
         finally:
             os.unlink(path)
