@@ -27,6 +27,7 @@ obj/
 # --- Simulation ---
 sim_build/
 sim_build_*/
+sim/results.xml
 __pycache__/
 *.pyc
 *.pyo
@@ -37,6 +38,7 @@ synth/*.log
 synth/*.dot
 
 # --- Python ---
+.pytest_cache/
 *.egg-info/
 .venv/
 venv/
