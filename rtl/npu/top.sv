@@ -594,6 +594,23 @@ module npu_top #(
     logic [31:0] m0_wdata, m1_wdata, m2_wdata;
     logic        m0_wen,  m1_wen,  m2_wen;
 
+    logic pp_gemm_a_fill, pp_gemm_a_consume;
+    logic pp_gemm_a_fill_bank, pp_gemm_a_active_bank, pp_gemm_a_ready;
+    logic pp_gemm_b_fill, pp_gemm_b_consume;
+    logic pp_gemm_b_fill_bank, pp_gemm_b_active_bank, pp_gemm_b_ready;
+    logic pp_gemm_p_fill, pp_gemm_p_consume;
+    logic pp_gemm_p_fill_bank, pp_gemm_p_active_bank, pp_gemm_p_ready;
+
+    wire dma_target_asram = (csr_dma_sram_addr[15:12] == 4'h0);
+    wire dma_target_wsram = (csr_dma_sram_addr[15:12] == 4'h1);
+    wire dma_target_osram = (csr_dma_sram_addr[15:12] == 4'h2);
+    localparam logic [15:0] PP_GEMM_A_BANK_OFFSET = `PP_GEMM_A_SIZE;
+    localparam logic [15:0] PP_GEMM_B_BANK_OFFSET = `PP_GEMM_B_SIZE;
+    wire [15:0] dma_gemm_a_fill_offset = pp_gemm_a_fill_bank ? PP_GEMM_A_BANK_OFFSET : 16'd0;
+    wire [15:0] dma_gemm_b_fill_offset = pp_gemm_b_fill_bank ? PP_GEMM_B_BANK_OFFSET : 16'd0;
+    wire [15:0] gpl_gemm_a_active_offset = pp_gemm_a_active_bank ? PP_GEMM_A_BANK_OFFSET : 16'd0;
+    wire [15:0] gpl_gemm_b_active_offset = pp_gemm_b_active_bank ? PP_GEMM_B_BANK_OFFSET : 16'd0;
+
     crossbar u_crossbar (
         .clk,
         .rst_n       (dp_rst_n),
@@ -635,6 +652,7 @@ module npu_top #(
         logic [15:0]   dma_br_row_bytes;
         logic [15:0]   dma_br_sram_stride;
         logic [31:0]   dma_br_sram_addr_calc;
+        logic [31:0]   dma_br_xbar_addr_calc;
 
     always_comb begin
         dma_br_rows = (csr_dma_is_2d && csr_dma_row_count != 16'd0)
@@ -645,6 +663,13 @@ module npu_top #(
         dma_br_sram_addr_calc = {16'd0, csr_dma_sram_addr}
                               + ({16'd0, dma_br_row} * {16'd0, dma_br_sram_stride})
                               + {16'd0, dma_br_cnt};
+        dma_br_xbar_addr_calc = dma_br_sram_addr_calc;
+        if (dma_br_state == DMA_BR_COPY) begin
+            if (dma_target_asram)
+                dma_br_xbar_addr_calc = dma_br_sram_addr_calc + {16'd0, dma_gemm_a_fill_offset};
+            else if (dma_target_wsram)
+                dma_br_xbar_addr_calc = dma_br_sram_addr_calc + {16'd0, dma_gemm_b_fill_offset};
+        end
         dma_br_word_active = (dma_br_row < dma_br_rows) &&
                              (dma_br_cnt < dma_br_row_bytes);
     end
@@ -729,7 +754,7 @@ module npu_top #(
 	    assign m0_req   = dma_br_word_active &&
 	                      (((dma_br_state == DMA_BR_COPY) && dma_br_phase) ||
 	                       (dma_br_state == DMA_BR_PREFILL));
-    assign m0_addr  = dma_br_sram_addr_calc[15:0];
+    assign m0_addr  = dma_br_xbar_addr_calc[15:0];
     assign m0_wdata = (dma_br_state == DMA_BR_COPY) ? dma_sim_sram_rdata[31:0] : 32'd0;
     assign m0_wen   = (dma_br_state == DMA_BR_COPY) && dma_br_phase;
 
@@ -823,10 +848,12 @@ module npu_top #(
         case (gpl_state)
             GPL_LOAD_B0, GPL_LOAD_B1, GPL_LOAD_B2, GPL_LOAD_B3:
                 gpl_read_addr = gpl_b_base
+                              + gpl_gemm_b_active_offset
                               + {4'd0, gpl_row, 4'd0}
                               + {10'd0, gpl_b_word, 2'd0};
             GPL_LOAD_A:
                 gpl_read_addr = gpl_a_base
+                              + gpl_gemm_a_active_offset
                               + ({8'd0, gpl_row[3:0]} * {7'd0, gpl_k_bytes})
                               + {8'd0, gpl_word, 2'd0};
             GPL_DESC0: gpl_read_addr = gpl_desc_ptr_latched;
@@ -1146,9 +1173,6 @@ module npu_top #(
     // ================================================================
     // Ping-pong buffer controllers
     // ================================================================
-    logic pp_gemm_a_fill, pp_gemm_a_consume;
-    logic pp_gemm_a_fill_bank, pp_gemm_a_active_bank, pp_gemm_a_ready;
-
     pingpong #(.BUF_SIZE(`PP_GEMM_A_SIZE)) u_pp_gemm_a (
         .clk,
         .rst_n        (dp_rst_n),
@@ -1159,9 +1183,6 @@ module npu_top #(
         .ready        (pp_gemm_a_ready)
     );
 
-    logic pp_gemm_b_fill, pp_gemm_b_consume;
-    logic pp_gemm_b_fill_bank, pp_gemm_b_active_bank, pp_gemm_b_ready;
-
     pingpong #(.BUF_SIZE(`PP_GEMM_B_SIZE)) u_pp_gemm_b (
         .clk,
         .rst_n        (dp_rst_n),
@@ -1171,9 +1192,6 @@ module npu_top #(
         .active_bank  (pp_gemm_b_active_bank),
         .ready        (pp_gemm_b_ready)
     );
-
-    logic pp_gemm_p_fill, pp_gemm_p_consume;
-    logic pp_gemm_p_fill_bank, pp_gemm_p_active_bank, pp_gemm_p_ready;
 
     pingpong #(.BUF_SIZE(`PP_GEMM_P_SIZE)) u_pp_gemm_p (
         .clk,
@@ -1213,10 +1231,6 @@ module npu_top #(
 
     wire dma_bridge_copy_done = (dma_br_state == DMA_BR_COPY) &&
                                 (dma_br_next == DMA_BR_IDLE);
-    wire dma_target_asram = (csr_dma_sram_addr[15:12] == 4'h0);
-    wire dma_target_wsram = (csr_dma_sram_addr[15:12] == 4'h1);
-    wire dma_target_osram = (csr_dma_sram_addr[15:12] == 4'h2);
-
     assign pp_gemm_a_fill    = dma_bridge_copy_done && dma_target_asram;
     assign pp_gemm_a_consume = gemm_done;
     assign pp_gemm_b_fill    = dma_bridge_copy_done && dma_target_wsram;

@@ -73,6 +73,8 @@ DSRAM_BASE = 0x3000
 ASRAM_BASE = 0x0000
 WSRAM_BASE = 0x1000
 OSRAM_BASE = 0x2000
+PP_GEMM_A_SIZE = 256
+PP_GEMM_B_SIZE = 256
 
 
 def ctrl_start(opcode):
@@ -112,6 +114,46 @@ async def wait_csr_idle_after_busy(dut, timeout_cycles=500):
         if busy_seen and not busy:
             return
     raise AssertionError("CSR busy did not assert and return idle")
+
+
+async def start_dma_load_and_collect_copy_addrs(dut, ext_addr, sram_addr,
+                                                length, timeout_cycles=500):
+    await csr_write(dut, CSR_DMA_CSR0, ext_addr)
+    await csr_write(dut, CSR_DMA_CSR1, sram_addr)
+    await csr_write(dut, CSR_DMA_CSR2, length)
+    await csr_write(dut, CSR_DMA_CSR3, DMA_CSR3_START)
+
+    busy_seen = False
+    copy_addrs = []
+    for _ in range(timeout_cycles):
+        await RisingEdge(dut.clk)
+        await Timer(1, unit="ps")
+        if int(dut.m0_wen.value) and int(dut.xbar_m0_grant.value):
+            copy_addrs.append(int(dut.m0_addr.value) & 0xFFFF)
+        busy = (await csr_read(dut, CSR_STATUS)) & 1
+        if busy:
+            busy_seen = True
+        if busy_seen and not busy:
+            return copy_addrs
+    raise AssertionError("DMA LOAD did not assert busy and return idle")
+
+
+async def wait_gemm_idle_after_busy(dut, timeout_cycles=2000):
+    busy_seen = False
+    for _ in range(timeout_cycles):
+        await RisingEdge(dut.clk)
+        await Timer(1, unit="ps")
+        busy = (await csr_read(dut, CSR_STATUS)) & 1
+        if busy:
+            busy_seen = True
+        if busy_seen and not busy:
+            return
+    status = await csr_read(dut, CSR_STATUS)
+    raise AssertionError(
+        f"GEMM did not complete: busy_seen={busy_seen} "
+        f"status=0x{status:08X} gpl_state={int(dut.gpl_state.value)} "
+        f"gemm_busy={int(dut.gemm_busy.value)} wb_active={int(dut.gemm_wb_active.value)}"
+    )
 
 
 async def if_load(dut, addr, instr):
@@ -807,6 +849,89 @@ async def test_dma_load_marks_gemm_pingpong_inputs_ready(dut):
     assert int(dut.pp_gemm_b_ready.value) == 1, "WSRAM DMA LOAD did not fill GEMM B ping-pong"
     assert int(dut.pp_gemm_b_active_bank.value) == 0, "first GEMM B fill should select bank 0"
     dut._log.info("PASS: DMA LOAD marks GEMM A/B ping-pong inputs ready")
+
+
+@cocotb.test()
+async def test_gemm_pingpong_bank_offsets_drive_dma_and_preloader(dut):
+    """GEMM A/B DMA fill and compute consume use ping-pong bank windows."""
+    await setup_dut(dut)
+
+    dut.rst_n.value = 1
+    await RisingEdge(dut.clk)
+    await Timer(1, unit="ps")
+
+    await csr_write(dut, CSR_CTRL, CSR_CTRL_RESET)
+    for i in range(4):
+        await if_load(dut, i, (OP_WFI << 24))
+    await csr_write(dut, CSR_CTRL, 0)
+    await ClockCycles(dut.clk, 2)
+
+    a0_addrs = await start_dma_load_and_collect_copy_addrs(
+        dut, 0x00000A00, ASRAM_BASE, 8)
+    assert a0_addrs == [ASRAM_BASE, ASRAM_BASE + 4], (
+        f"first ASRAM LOAD should fill A bank0, got {a0_addrs}"
+    )
+    assert int(dut.pp_gemm_a_active_bank.value) == 0
+    assert int(dut.pp_gemm_a_fill_bank.value) == 1
+
+    a1_addrs = await start_dma_load_and_collect_copy_addrs(
+        dut, 0x00000A40, ASRAM_BASE, 8)
+    assert a1_addrs == [ASRAM_BASE + PP_GEMM_A_SIZE,
+                        ASRAM_BASE + PP_GEMM_A_SIZE + 4], (
+        f"second ASRAM LOAD should fill A bank1, got {a1_addrs}"
+    )
+
+    b0_addrs = await start_dma_load_and_collect_copy_addrs(
+        dut, 0x00000B00, WSRAM_BASE, 8)
+    assert b0_addrs == [WSRAM_BASE, WSRAM_BASE + 4], (
+        f"first WSRAM LOAD should fill B bank0, got {b0_addrs}"
+    )
+    assert int(dut.pp_gemm_b_active_bank.value) == 0
+    assert int(dut.pp_gemm_b_fill_bank.value) == 1
+
+    b1_addrs = await start_dma_load_and_collect_copy_addrs(
+        dut, 0x00000B40, WSRAM_BASE, 8)
+    assert b1_addrs == [WSRAM_BASE + PP_GEMM_B_SIZE,
+                        WSRAM_BASE + PP_GEMM_B_SIZE + 4], (
+        f"second WSRAM LOAD should fill B bank1, got {b1_addrs}"
+    )
+
+    await csr_write(dut, CSR_CTRL, ctrl_start(OP_GEMM))
+    await wait_gemm_idle_after_busy(dut, timeout_cycles=2200)
+
+    assert int(dut.pp_gemm_a_active_bank.value) == 1, (
+        "GEMM consume did not advance A active bank to bank1"
+    )
+    assert int(dut.pp_gemm_b_active_bank.value) == 1, (
+        "GEMM consume did not advance B active bank to bank1"
+    )
+
+    await csr_write(dut, CSR_CTRL, ctrl_start(OP_GEMM))
+
+    first_b_read = None
+    first_a_read = None
+    for _ in range(400):
+        await RisingEdge(dut.clk)
+        await Timer(1, unit="ps")
+        state = int(dut.gpl_state.value)
+        if int(dut.xbar_m1_grant.value):
+            addr = int(dut.m1_addr.value) & 0xFFFF
+            if state in (1, 2, 3, 4) and first_b_read is None:
+                first_b_read = addr
+            elif state == 5 and first_a_read is None:
+                first_a_read = addr
+                break
+
+    assert first_b_read == WSRAM_BASE + PP_GEMM_B_SIZE, (
+        f"second GEMM should preload B active bank1 at "
+        f"0x{WSRAM_BASE + PP_GEMM_B_SIZE:04X}, got {first_b_read}"
+    )
+    assert first_a_read == ASRAM_BASE + PP_GEMM_A_SIZE, (
+        f"second GEMM should preload A active bank1 at "
+        f"0x{ASRAM_BASE + PP_GEMM_A_SIZE:04X}, got {first_a_read}"
+    )
+    await wait_gemm_idle_after_busy(dut, timeout_cycles=2200)
+    dut._log.info("PASS: GEMM ping-pong bank offsets drive DMA fill and preload")
 
 
 @cocotb.test()
