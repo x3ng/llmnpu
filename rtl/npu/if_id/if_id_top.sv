@@ -4,6 +4,7 @@ module if_id_top (
     input  logic        mem_we,
     input  logic [7:0]  mem_addr,
     input  logic [31:0] mem_wdata,
+    input  logic        halt,
     input  logic        gemm_busy, valu_busy, sfu_busy, dma_busy,
     output logic        gemm_cmd_valid, valu_cmd_valid, sfu_cmd_valid, dma_cmd_valid,
     output logic [31:0] gemm_cmd, valu_cmd, sfu_cmd, dma_cmd,
@@ -44,7 +45,7 @@ module if_id_top (
         (is_sync && (gemm_busy || valu_busy || sfu_busy || dma_busy))
     );
     wire dispatch_wfi = id_valid && is_wfi && !halted;
-    wire stall_w = halted || busy_stall_w;
+    wire stall_w = halted || halt || busy_stall_w;
 
     // Single synchronous always block: imem write first, then reset/pipeline.
     always @(posedge clk) begin

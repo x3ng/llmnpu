@@ -52,6 +52,10 @@ DMA_CSR3_START   = 1 << 0
 DMA_CSR3_DIR_ST  = 1 << 1
 DMA_CSR3_MODE_2D = 1 << 2
 
+CSR_CTRL_START = 1 << 0
+CSR_CTRL_RESET = 1 << 1
+CSR_CTRL_HALT  = 1 << 2
+
 DEBUG_GPL_STATE_SHIFT = 5
 DEBUG_GPL_STATE_MASK = 0x7 << DEBUG_GPL_STATE_SHIFT
 
@@ -690,6 +694,42 @@ async def test_ifid_dma_store_prefills_dma_sram(dut):
         f"IF/ID DMA_ST prefill expected 0x{expected:016X}, got 0x{got:016X}"
     )
     dut._log.info("PASS: IF/ID DMA_ST prefill copies O-SRAM into DMA SRAM")
+
+
+@cocotb.test()
+async def test_csr_halt_stalls_ifid_only(dut):
+    """CSR CTRL.HALT stops IF/ID dispatch without resetting datapath state."""
+    await setup_dut(dut)
+
+    dut.rst_n.value = 1
+    await RisingEdge(dut.clk)
+    await Timer(1, unit="ps")
+
+    await csr_write(dut, CSR_CTRL, CSR_CTRL_RESET | CSR_CTRL_HALT)
+    await if_load(dut, 0, (OP_VADD << 24) | (1 << 16) | (2 << 8) | 3)
+    await if_load(dut, 1, (OP_WFI << 24))
+
+    await csr_write(dut, CSR_CTRL, CSR_CTRL_HALT)
+    for cycle in range(8):
+        await RisingEdge(dut.clk)
+        await Timer(1, unit="ps")
+        assert not int(dut.valu_cmd_valid.value), (
+            f"VALU dispatched while CSR_CTRL.HALT=1 at cycle {cycle}"
+        )
+        assert int(dut.if_stall.value), "IF/ID stall should assert while HALT is set"
+
+    await csr_write(dut, CSR_CTRL, 0)
+    dispatched = False
+    for _ in range(8):
+        await RisingEdge(dut.clk)
+        await Timer(1, unit="ps")
+        if int(dut.valu_cmd_valid.value):
+            dispatched = True
+            assert int(dut.valu_cmd.value) == ((OP_VADD << 24) | (1 << 16) | (2 << 8) | 3)
+            break
+
+    assert dispatched, "IF/ID did not resume dispatch after CSR_CTRL.HALT cleared"
+    dut._log.info("PASS: CSR CTRL.HALT stalls IF/ID dispatch and resumes cleanly")
 
 
 @cocotb.test()

@@ -89,6 +89,7 @@ module npu_top #(
     logic        csr_dma_is_2d;
     logic [31:0] csr_desc_ptr;
     logic [7:0]  csr_issue_opcode;
+    logic        csr_halt;
 
     // ================================================================
     // Running flag
@@ -130,6 +131,7 @@ module npu_top #(
         .debug_signals   (debug_signals),
         .npu_start       (csr_start),
         .npu_rst         (csr_rst),
+        .npu_halt        (csr_halt),
         .issue_opcode    (csr_issue_opcode),
         .dma_ext_addr    (csr_dma_ext_addr),
         .dma_sram_addr   (csr_dma_sram_addr),
@@ -167,6 +169,7 @@ module npu_top #(
         .mem_we         (dbg_imem_we),
         .mem_addr       (dbg_imem_addr),
         .mem_wdata      (dbg_imem_wdata),
+        .halt           (csr_halt),
         .gemm_busy      (ifid_gemm_busy),
         .valu_busy      (valu_busy),
         .sfu_busy       (sfu_busy),

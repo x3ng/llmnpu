@@ -24,6 +24,7 @@ module csr (
     // Control outputs to NPU
     output logic        npu_start,
     output logic        npu_rst,
+    output logic        npu_halt,
     output logic [7:0]  issue_opcode,
 
     // DMA CSR register outputs (for top-level DMA wiring)
@@ -170,6 +171,7 @@ module csr (
     assign npu_start = we && (waddr == A_CTRL) && wdata[0];
 
     assign npu_rst = ctrl_reg[1];
+    assign npu_halt = ctrl_reg[2];
     assign issue_opcode = (we && (waddr == A_CTRL)) ? wdata[15:8] : ctrl_reg[15:8];
 
     // ----------------------------------------------------------------

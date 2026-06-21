@@ -24,6 +24,7 @@ async def setup_reset(dut):
     dut.mem_we.value = 0
     dut.mem_addr.value = 0
     dut.mem_wdata.value = 0
+    dut.halt.value = 0
     dut.gemm_busy.value = 0
     dut.valu_busy.value = 0
     dut.sfu_busy.value = 0
@@ -295,3 +296,43 @@ async def test_wfi_halts_dispatch(dut):
 
     assert int(dut.stall_if.value), "WFI should hold stall_if high after halt"
     dut._log.info("PASS: Test 5 WFI halts fetch/dispatch")
+
+
+@cocotb.test()
+async def test_external_halt_stalls_pc_without_dispatch(dut):
+    """External CSR HALT input stops fetch/dispatch until released."""
+    await setup_reset(dut)
+
+    await load_instrs(dut, [
+        0x01020304,  # GEMM must wait while halted
+        NOP,
+    ])
+
+    dut.halt.value = 1
+    dut.rst_n.value = 1
+    await Timer(1, unit='ns')
+
+    for cycle in range(5):
+        await RisingEdge(dut.clk)
+        await ReadOnly()
+        assert not int(dut.gemm_cmd_valid.value), \
+            f"GEMM dispatched while halt=1 at cycle {cycle}"
+        assert int(dut.debug_pc.value) == 0, \
+            f"PC advanced while halt=1: {int(dut.debug_pc.value)}"
+        assert int(dut.stall_if.value), "stall_if should assert while halt=1"
+        await Timer(1, unit='ns')
+
+    dut.halt.value = 0
+    dispatched = False
+    for _ in range(4):
+        await RisingEdge(dut.clk)
+        await ReadOnly()
+        if int(dut.gemm_cmd_valid.value):
+            dispatched = True
+            assert int(dut.gemm_cmd.value) == 0x01020304, \
+                f"halt release dispatched wrong cmd 0x{int(dut.gemm_cmd.value):08X}"
+            break
+        await Timer(1, unit='ns')
+
+    assert dispatched, "GEMM did not dispatch after halt release"
+    dut._log.info("PASS: external halt stalls PC/dispatch and resumes cleanly")
