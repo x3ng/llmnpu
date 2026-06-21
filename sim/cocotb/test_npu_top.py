@@ -9,6 +9,7 @@ Tests:
 import cocotb
 from cocotb.clock import Clock
 from cocotb.triggers import RisingEdge, Timer, ClockCycles
+from pathlib import Path
 
 
 # ---------- Helpers ----------
@@ -49,9 +50,13 @@ CSR_PERF_DMA  = 0x25
 OP_GEMM       = 0x01
 OP_VADD       = 0x10
 OP_ACT_RELU   = 0x20
+OP_ACT_GELU   = 0x21
+OP_ACT_SIGMOID= 0x22
+OP_ACT_TANH   = 0x23
 OP_ACT_RELU6  = 0x24
 OP_ACT_CLIP   = 0x25
 OP_QUANT      = 0x30
+OP_DEQUANT    = 0x31
 OP_DMA_LD     = 0x40
 OP_DMA_ST     = 0x41
 OP_SYNC       = 0xF0
@@ -85,6 +90,67 @@ PP_VALU_IN_BASE = OSRAM_BASE + (PP_GEMM_P_SIZE * 2)
 PP_VALU_OUT_BASE = PP_VALU_IN_BASE + (PP_VALU_SIZE * 2)
 PP_SFU_IN_BASE = PP_VALU_OUT_BASE + (PP_VALU_SIZE * 2)
 PP_SFU_OUT_BASE = PP_SFU_IN_BASE + (PP_SFU_SIZE * 2)
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _to_signed(value, bits):
+    value &= (1 << bits) - 1
+    sign = 1 << (bits - 1)
+    return value - (1 << bits) if value & sign else value
+
+
+def _sat_i8(value):
+    return max(-128, min(127, int(value))) & 0xFF
+
+
+def _arith_shift(value, shift):
+    return int(value) >> int(shift)
+
+
+def _round_shift_product(product, shift):
+    if shift == 0:
+        return product
+    bias = 1 << (shift - 1)
+    if product >= 0:
+        return (product + bias) >> shift
+    return (product + bias - 1) >> shift
+
+
+def _load_lut(name):
+    lut_path = REPO_ROOT / "synth" / "luts" / f"{name}.hex"
+    return [_to_signed(int(line.strip(), 16), 8)
+            for line in lut_path.read_text().splitlines() if line.strip()]
+
+
+_SFU_LUTS = {
+    OP_ACT_GELU: _load_lut("gelu"),
+    OP_ACT_SIGMOID: _load_lut("sigmoid"),
+    OP_ACT_TANH: _load_lut("tanh"),
+}
+
+
+def golden_sfu_byte(opcode, value, zp=0, scale_mul=1, scale_shr=0):
+    signed = _to_signed(value, 8)
+    if opcode == OP_ACT_RELU6:
+        return max(0, min(6, signed)) & 0xFF
+    if opcode == OP_ACT_CLIP:
+        return max(0, min(zp & 0xFF, signed)) & 0xFF
+    if opcode in _SFU_LUTS:
+        lut = _SFU_LUTS[opcode]
+        offset = (value + 128) & 0xFF
+        idx = (offset >> 3) & 0x1F
+        frac = offset & 0x7
+        lut_val = lut[idx]
+        lut_next = lut[idx + 1 if idx < 31 else 31]
+        return _sat_i8(lut_val + (((lut_next - lut_val) * frac) >> 3))
+    if opcode == OP_DEQUANT:
+        product = (signed - (zp & 0xFF)) * _to_signed(scale_mul, 16)
+        return _sat_i8(_arith_shift(product, scale_shr & 0xFF))
+    if opcode == OP_QUANT:
+        product = signed * _to_signed(scale_mul, 16)
+        shifted = _round_shift_product(product, scale_shr & 0xFF)
+        return _sat_i8(shifted + (zp & 0xFF))
+    raise AssertionError(f"unsupported SFU opcode 0x{opcode:02X}")
 
 
 def ctrl_start(opcode):
@@ -1320,6 +1386,96 @@ async def test_sfu_pingpong_input_output_relu_tile_flow(dut):
     assert not mismatches0, f"SFU tile0 STORE mismatches: {mismatches0[:8]}"
     assert not mismatches1, f"SFU tile1 STORE mismatches: {mismatches1[:8]}"
     dut._log.info("PASS: SFU ping-pong input/output ReLU tile flow")
+
+
+@cocotb.test()
+async def test_sfu_descriptor_all_config_ops_dma_roundtrip(dut):
+    """SFU descriptor path covers all config opcodes over SRAM tiles."""
+    await setup_dut(dut)
+
+    async def reset_npu_context():
+        dut.rst_n.value = 1
+        await RisingEdge(dut.clk)
+        await Timer(1, unit="ps")
+        await csr_write(dut, CSR_CTRL, CSR_CTRL_RESET)
+        for idx in range(4):
+            await if_load(dut, idx, (OP_WFI << 24))
+        await csr_write(dut, CSR_CTRL, 0)
+        await ClockCycles(dut.clk, 2)
+
+    def make_tile(seed):
+        return [((idx * seed + 0x8D + (idx >> 2)) & 0xFF) for idx in range(256)]
+
+    cases = [
+        ("relu6", OP_ACT_RELU6, 0, 1, 0, make_tile(3)),
+        ("gelu", OP_ACT_GELU, 0, 1, 0, make_tile(5)),
+        ("sigmoid", OP_ACT_SIGMOID, 0, 1, 0, make_tile(7)),
+        ("tanh", OP_ACT_TANH, 0, 1, 0, make_tile(11)),
+        ("quant", OP_QUANT, 9, 3, 1, make_tile(13)),
+        ("dequant", OP_DEQUANT, 17, 2, 1, make_tile(17)),
+    ]
+
+    for case_idx, (name, opcode, zp, scale_mul, scale_shr, tile) in enumerate(cases):
+        await reset_npu_context()
+        in_ext = 0x00009000 + case_idx * 0x400
+        out_ext = in_ext + 0x200
+        expected = [
+            golden_sfu_byte(opcode, value, zp=zp,
+                            scale_mul=scale_mul, scale_shr=scale_shr)
+            for value in tile
+        ]
+        dma_ext_write_bytes(dut, in_ext, tile)
+        await Timer(1, unit="ps")
+
+        load_addrs = await start_dma_load_and_collect_copy_addrs(
+            dut, in_ext, PP_SFU_IN_BASE, 256, timeout_cycles=2200)
+        assert load_addrs[0] == PP_SFU_IN_BASE, (
+            f"{name}: DMA LOAD did not target SFU input bank0"
+        )
+        assert load_addrs[-1] == PP_SFU_IN_BASE + 252
+        assert int(dut.pp_sfu_in_ready.value) == 1, (
+            f"{name}: SFU input bank not ready after DMA LOAD"
+        )
+
+        dsram_write_word(dut, DSRAM_BASE + 0,
+                         ((zp & 0xFF) << 24) | (opcode << 16) | 256)
+        dsram_write_word(dut, DSRAM_BASE + 4, PP_SFU_IN_BASE)
+        dsram_write_word(dut, DSRAM_BASE + 8, PP_SFU_OUT_BASE)
+        dsram_write_word(dut, DSRAM_BASE + 12,
+                         ((scale_shr & 0xFF) << 16) | (scale_mul & 0xFFFF))
+        await csr_write(dut, CSR_DESC_PTR, DSRAM_BASE)
+        await csr_write(dut, CSR_CTRL, ctrl_start(opcode))
+        await wait_sfu_idle_after_busy(dut, timeout_cycles=6000)
+
+        assert int(dut.pp_sfu_out_ready.value) == 1, (
+            f"{name}: SFU output bank not ready after descriptor run"
+        )
+        first_word = osram_read_word(dut, PP_SFU_OUT_BASE)
+        expected_word = (expected[0] |
+                         (expected[1] << 8) |
+                         (expected[2] << 16) |
+                         (expected[3] << 24))
+        assert first_word == expected_word, (
+            f"{name}: output word0 expected 0x{expected_word:08X}, "
+            f"got 0x{first_word:08X}"
+        )
+
+        store_addrs = await start_dma_store_and_collect_prefill_addrs(
+            dut, out_ext, PP_SFU_OUT_BASE, 256, timeout_cycles=2200)
+        assert store_addrs[0] == PP_SFU_OUT_BASE, (
+            f"{name}: DMA STORE did not read SFU output bank0"
+        )
+        assert store_addrs[-1] == PP_SFU_OUT_BASE + 252
+
+        got = dma_ext_read_bytes(dut, out_ext, 256)
+        mismatches = [(idx, got[idx], expected[idx])
+                      for idx in range(256) if got[idx] != expected[idx]]
+        assert not mismatches, (
+            f"{name}: SFU descriptor DMA roundtrip mismatches "
+            f"{mismatches[:8]}"
+        )
+
+    dut._log.info("PASS: SFU descriptor covers all config opcodes")
 
 
 @cocotb.test()
