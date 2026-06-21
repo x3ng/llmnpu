@@ -579,6 +579,7 @@ module npu_top #(
     logic [4:0]  gpl_out_scale_shr;
     logic signed [15:0] gpl_out_scale_mul;
     logic        gpl_relu;
+    logic signed [7:0] gpl_out_zp;
     logic        gpl_desc_valid;
 
     assign gemm_k_count = gpl_k_count;
@@ -669,6 +670,7 @@ module npu_top #(
             gpl_out_scale_shr      <= 5'd0;
             gpl_out_scale_mul      <= 16'sd1;
             gpl_relu               <= 1'b0;
+            gpl_out_zp             <= 8'sd0;
             gpl_desc_valid         <= 1'b0;
             for (int r = 0; r < 16; r++) begin
                 gpl_a_row[r] <= 128'd0;
@@ -721,6 +723,7 @@ module npu_top #(
                         if (gpl_desc_valid) begin
                             gpl_out_scale_mul[15:8] <= xbar_m1_rdata[7:0];
                             gpl_relu <= |xbar_m1_rdata[15:8];
+                            gpl_out_zp <= xbar_m1_rdata[23:16];
                         end
                     end
                     default: begin
@@ -749,6 +752,7 @@ module npu_top #(
                         gpl_out_scale_shr    <= 5'd0;
                         gpl_out_scale_mul    <= 16'sd1;
                         gpl_relu             <= 1'b0;
+                        gpl_out_zp           <= 8'sd0;
                         gpl_desc_valid       <= 1'b0;
                     end
                 end
@@ -895,6 +899,7 @@ module npu_top #(
             shifted = scaled >>> gpl_out_scale_shr;
             if (gpl_relu && shifted < 32'sd0)
                 shifted = 32'sd0;
+            shifted = shifted + {{24{gpl_out_zp[7]}}, gpl_out_zp};
 
             if (shifted > 32'sd32767)
                 gemm_postprocess = 16'h7FFF;

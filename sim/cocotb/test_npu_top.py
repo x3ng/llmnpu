@@ -323,7 +323,7 @@ async def test_csr_gemm_k2_computes_from_descriptor(dut):
     dsram_write_word(dut, DSRAM_BASE + 4, 0x01000002)  # K=2, A=0, B=1
     dsram_write_word(dut, DSRAM_BASE + 8, 0x00FE0102)  # O=2, a_zp=1, b_zp=-2
     dsram_write_word(dut, DSRAM_BASE + 12, 0x02000100)  # shr=1, mul low=2
-    dsram_write_word(dut, DSRAM_BASE + 16, 0x00000100)  # mul high=0, relu=1
+    dsram_write_word(dut, DSRAM_BASE + 16, 0x00030100)  # mul high=0, relu=1, out_zp=3
     await Timer(1, unit="ps")
 
     await csr_write(dut, CSR_DESC_PTR, DSRAM_BASE)
@@ -356,6 +356,7 @@ async def test_csr_gemm_k2_computes_from_descriptor(dut):
             exp = _sat16((acc * 2) >> 1)
             if exp < 0:
                 exp = 0
+            exp = _sat16(exp + 3)
             if got != exp:
                 mismatches.append((r, c, got, exp))
 
