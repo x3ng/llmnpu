@@ -323,6 +323,7 @@ module npu_top #(
     logic [7:0]  dma_opcode;
     logic [7:0]  dma_opcode_latched;
     logic        dma_done;
+    logic        dma_load_inflight;
     wire         dma_cmd_is_store = dma_cmd_valid && (dma_cmd[31:24] == `OP_DMA_ST);
 
     // Bridge state type
@@ -362,6 +363,16 @@ module npu_top #(
             dma_opcode_latched <= 8'd0;
         else if (dma_start)
             dma_opcode_latched <= dma_opcode;
+    end
+
+    always_ff @(posedge clk or negedge dp_rst_n) begin
+        if (!dp_rst_n)
+            dma_load_inflight <= 1'b0;
+        else if ((csr_dma_start && !csr_dma_is_store) ||
+                 (dma_cmd_valid && (dma_cmd[31:24] != `OP_DMA_ST)))
+            dma_load_inflight <= 1'b1;
+        else if ((dma_br_state == DMA_BR_COPY) && (dma_br_next == DMA_BR_IDLE))
+            dma_load_inflight <= 1'b0;
     end
 
     // DMA sim port wires (for DMA→Crossbar bridge)
@@ -550,7 +561,7 @@ module npu_top #(
         dma_br_next = dma_br_state;
         case (dma_br_state)
             DMA_BR_IDLE: begin
-                if (dma_done && dma_opcode_latched == `OP_DMA_LD)
+                if (dma_done && dma_load_inflight)
                     dma_br_next = DMA_BR_COPY;
                 else if ((csr_dma_start && csr_dma_is_store) || dma_cmd_is_store)
                     dma_br_next = DMA_BR_PREFILL;
@@ -1083,10 +1094,11 @@ module npu_top #(
     assign gemm_preload_busy = (gpl_state != GPL_IDLE);
     assign ifid_gemm_busy = gemm_cmd_valid || gemm_busy || gemm_preload_busy ||
                             gemm_psum_valid || gemm_wb_active;
-    assign ifid_dma_busy = dma_cmd_valid || dma_busy || bridge_busy || dma_restart;
+    assign ifid_dma_busy = dma_cmd_valid || dma_busy || bridge_busy ||
+                           dma_load_inflight || dma_restart;
 
     assign npu_busy = gemm_busy || valu_busy || sfu_busy || dma_busy ||
-                      bridge_busy || gemm_preload_busy ||
+                      bridge_busy || dma_load_inflight || gemm_preload_busy ||
                       gemm_psum_valid || gemm_wb_active;
 
     assign npu_going_idle = (valu_busy && valu_done)  ||

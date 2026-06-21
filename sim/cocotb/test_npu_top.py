@@ -176,6 +176,15 @@ async def setup_dut(dut):
     dut.dbg_valu_waddr.value = 0
     dut.dbg_valu_wdata_flat.value = 0
     dut.dbg_valu_raddr.value = 0
+    dut.dma_axi_arready.value = 0
+    dut.dma_axi_rdata.value = 0
+    dut.dma_axi_rresp.value = 0
+    dut.dma_axi_rlast.value = 0
+    dut.dma_axi_rvalid.value = 0
+    dut.dma_axi_awready.value = 0
+    dut.dma_axi_wready.value = 0
+    dut.dma_axi_bresp.value = 0
+    dut.dma_axi_bvalid.value = 0
 
     await ClockCycles(dut.clk, 3)
 
@@ -564,6 +573,75 @@ async def test_csr_dma_2d_store_prefill_strided(dut):
         )
 
     dut._log.info("PASS: CSR DMA 2D STORE bridge prefill uses SRAM stride")
+
+
+@cocotb.test()
+async def test_csr_dma_2d_load_copy_strided(dut):
+    """CSR 2D LOAD bridge copy writes crossbar SRAM rows with stride."""
+    await setup_dut(dut)
+
+    dut.rst_n.value = 1
+    await RisingEdge(dut.clk)
+    await Timer(1, unit="ps")
+
+    await csr_write(dut, CSR_CTRL, 0x00000002)
+    for i in range(4):
+        await if_load(dut, i, 0xFF000000)
+    await csr_write(dut, CSR_CTRL, 0x00000000)
+    await ClockCycles(dut.clk, 2)
+
+    rows = 3
+    row_bytes = 8
+    ext_stride = 24
+    sram_stride = 16
+    ext_base = 0x00000900
+    sram_base = ASRAM_BASE
+    await csr_write(dut, CSR_DMA_CSR0, ext_base)
+    await csr_write(dut, CSR_DMA_CSR1,
+                    ((sram_stride & 0xFFFF) << 16) | (sram_base & 0xFFFF))
+    await csr_write(dut, CSR_DMA_CSR2,
+                    ((rows & 0xFFFF) << 16) | (row_bytes & 0xFFFF))
+    await csr_write(dut, CSR_DMA_CSR3,
+                    ((ext_stride & 0xFFFF) << 16) |
+                    DMA_CSR3_MODE_2D | DMA_CSR3_START)
+
+    busy_seen = False
+    idle_seen = False
+    copy_addrs = []
+    for _ in range(500):
+        await RisingEdge(dut.clk)
+        await Timer(1, unit="ps")
+        if int(dut.m0_wen.value) and int(dut.xbar_m0_grant.value):
+            copy_addrs.append(int(dut.m0_addr.value) & 0xFFFF)
+        busy = (await csr_read(dut, CSR_STATUS)) & 1
+        if busy:
+            busy_seen = True
+        if busy_seen and not busy:
+            idle_seen = True
+            break
+
+    assert busy_seen, "2D LOAD never entered busy state"
+    assert idle_seen, "2D LOAD did not finish"
+    expected_addrs = [
+        sram_base + 0,
+        sram_base + 4,
+        sram_base + sram_stride + 0,
+        sram_base + sram_stride + 4,
+        sram_base + 2 * sram_stride + 0,
+        sram_base + 2 * sram_stride + 4,
+    ]
+    assert copy_addrs == expected_addrs, (
+        f"2D LOAD bridge copy addresses: expected {expected_addrs}, got {copy_addrs}; "
+        f"br_state={int(dut.dma_br_state.value)} "
+        f"load_inflight={int(dut.dma_load_inflight.value)} "
+        f"dma_done={int(dut.dma_done.value)} "
+        f"dma_busy={int(dut.dma_busy.value)} "
+        f"opcode=0x{int(dut.dma_opcode_latched.value):02X}"
+    )
+    assert (sram_base + row_bytes) not in copy_addrs, (
+        "2D LOAD bridge wrote the first SRAM stride gap"
+    )
+    dut._log.info("PASS: CSR DMA 2D LOAD bridge copy uses SRAM stride")
 
 
 @cocotb.test()

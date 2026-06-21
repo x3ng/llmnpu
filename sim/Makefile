@@ -135,7 +135,7 @@ test_npu_top:
 	PYTHONPATH=$(SIM_DIR)/cocotb:$$PYTHONPATH \
 	MODULE=test_npu_top TOPLEVEL=npu_top \
 	VERILOG_SOURCES="$(E2E_RTL)" \
-	$(MAKE)
+	$(MAKE) COMPILE_ARGS='$(COMPILE_ARGS) -P npu_top.DMA_STANDALONE=1'
 
 # ── E2E helper: build RISC-V firmware and convert to hex ──
 # Usage: $(call build_fw,<target_name>,<c_sources>,<extra_gcc_flags>)
