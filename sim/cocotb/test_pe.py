@@ -47,7 +47,7 @@ async def test_pe_basic_accumulate(dut):
 
     # === Load weight ===
     dut.load_b.value = 1
-    dut.b_in.value = weight & 0xFF
+    dut.b_in.value = weight & 0x1FF
     await posedge(dut)
     dut.load_b.value = 0
     await posedge(dut)
@@ -80,7 +80,7 @@ async def test_pe_basic_accumulate(dut):
 
         # Feed activation
         dut.valid_in.value = 1
-        dut.a_in.value = act & 0xFF
+        dut.a_in.value = act & 0x1FF
         await posedge(dut)
 
         # Model: psum <= old_acc, acc <= acc + a_reg*b_reg, a_reg <= a_in

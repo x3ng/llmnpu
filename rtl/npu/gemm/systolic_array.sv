@@ -17,12 +17,13 @@ module systolic_array #(
     input  logic                        clk,
     input  logic                        rst_n,
 
-    // A input (ROWS × 8-bit): broadcast to all PEs in each row
-    input  logic [ROWS-1:0][7:0]        a_in,
+    // A input (ROWS x signed 9-bit): broadcast to all PEs in each row.
+    // The extra bit carries descriptor zero-point adjustment.
+    input  logic signed [ROWS-1:0][8:0] a_in,
     input  logic                        a_valid,
 
-    // B input (COLS × 8-bit): broadcast to all rows simultaneously
-    input  logic [COLS-1:0][7:0]        b_in,
+    // B input (COLS x signed 9-bit): broadcast to all rows simultaneously.
+    input  logic signed [COLS-1:0][8:0] b_in,
 
     // Control
     input  logic                        start,
@@ -52,8 +53,8 @@ module systolic_array #(
 
     // ── PE internal wires ─────────────────────────────────────────────
     logic [ROWS-1:0][COLS-1:0][31:0] pe_sum;
-    logic [ROWS-1:0][COLS-1:0][7:0]  a_term;   // terminate unused PE a_out
-    logic [ROWS-1:0][COLS-1:0][7:0]  b_term;   // terminate unused PE b_out
+    logic signed [ROWS-1:0][COLS-1:0][8:0]  a_term;   // terminate unused PE a_out
+    logic signed [ROWS-1:0][COLS-1:0][8:0]  b_term;   // terminate unused PE b_out
 
     // PE valid: only during COMPUTE state AND when A data is valid
     logic pe_valid;

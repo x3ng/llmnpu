@@ -180,7 +180,7 @@ module npu_top #(
     logic               gemm_start;
     logic [7:0]         gemm_k_count;
     logic               gemm_done;
-    logic [15:0][7:0]   gemm_a_in, gemm_b_in;
+    logic signed [15:0][8:0] gemm_a_in, gemm_b_in;
     logic [15:0][15:0][15:0] gemm_psum;
     logic               gemm_psum_valid;
 
@@ -574,6 +574,8 @@ module npu_top #(
     logic [15:0] gpl_o_base;
     logic [7:0]  gpl_k_count;
     logic [4:0]  gpl_k_tiles;
+    logic signed [7:0] gpl_a_zp;
+    logic signed [7:0] gpl_b_zp;
     logic [4:0]  gpl_out_scale_shr;
     logic signed [15:0] gpl_out_scale_mul;
     logic        gpl_relu;
@@ -628,9 +630,17 @@ module npu_top #(
 
     always_comb begin
         gpl_feed_byte = {gpl_feed_k, 3'b000};
-        for (int r = 0; r < 16; r++)
-            gemm_a_in[r] = gpl_a_row[r][gpl_feed_byte +: 8];
         gpl_b_feed_row = gpl_b_row[gpl_feed_k];
+        for (int r = 0; r < 16; r++) begin
+            logic signed [7:0] a_byte;
+            a_byte = gpl_a_row[r][gpl_feed_byte +: 8];
+            gemm_a_in[r] = {a_byte[7], a_byte} - {gpl_a_zp[7], gpl_a_zp};
+        end
+        for (int c = 0; c < 16; c++) begin
+            logic signed [7:0] b_byte;
+            b_byte = gpl_b_feed_row[c*8 +: 8];
+            gemm_b_in[c] = {b_byte[7], b_byte} - {gpl_b_zp[7], gpl_b_zp};
+        end
     end
 
     always_ff @(posedge clk or negedge dp_rst_n) begin
@@ -654,6 +664,8 @@ module npu_top #(
             gpl_o_base             <= `OSRAM_BASE;
             gpl_k_count            <= 8'd16;
             gpl_k_tiles            <= 5'd1;
+            gpl_a_zp               <= 8'sd0;
+            gpl_b_zp               <= 8'sd0;
             gpl_out_scale_shr      <= 5'd0;
             gpl_out_scale_mul      <= 16'sd1;
             gpl_relu               <= 1'b0;
@@ -692,8 +704,11 @@ module npu_top #(
                         end
                     end
                     3'd2: begin
-                        if (gpl_desc_valid)
+                        if (gpl_desc_valid) begin
                             gpl_o_base <= {xbar_m1_rdata[3:0], 12'd0};
+                            gpl_a_zp <= xbar_m1_rdata[15:8];
+                            gpl_b_zp <= xbar_m1_rdata[23:16];
+                        end
                     end
                     3'd3: begin
                         if (gpl_desc_valid) begin
@@ -729,6 +744,8 @@ module npu_top #(
                         gpl_k_count          <= (gemm_issue_cmd[7:0] == 8'd0) ? 8'd16 :
                                                 gemm_issue_cmd[7:0];
                         gpl_k_tiles          <= 5'd1;
+                        gpl_a_zp             <= 8'sd0;
+                        gpl_b_zp             <= 8'sd0;
                         gpl_out_scale_shr    <= 5'd0;
                         gpl_out_scale_mul    <= 16'sd1;
                         gpl_relu             <= 1'b0;
@@ -911,8 +928,6 @@ module npu_top #(
     assign m2_addr  = gemm_wb_addr;
     assign m2_wdata = gemm_wb_wdata;
     assign m2_wen   = gemm_wb_active;
-
-    assign gemm_b_in = gpl_b_feed_row[127:0];
 
     // ================================================================
     // Ping-pong buffer controllers

@@ -61,26 +61,26 @@ async def clock_cycles(dut, n):
 # Pack / unpack helpers
 # ---------------------------------------------------------------------------
 def pack_a(arr):
-    """Pack 16 x INT8 a_in vector into a 128-bit integer.
+    """Pack 16 x signed 9-bit a_in vector into an integer.
 
-    SV packed array mapping: a_in[15:0][7:0] -> bits [r*8+7 : r*8] = a_in[r].
+    SV packed array mapping: a_in[15:0][8:0] -> bits [r*9+8 : r*9] = a_in[r].
     """
     val = 0
     for r in range(ROWS):
-        byte = int(arr[r]) & 0xFF
-        val |= byte << (r * 8)
+        lane = int(arr[r]) & 0x1FF
+        val |= lane << (r * 9)
     return val
 
 
 def pack_b(arr):
-    """Pack 16 x INT8 b_in vector into a 128-bit integer.
+    """Pack 16 x signed 9-bit b_in vector into an integer.
 
-    SV packed array mapping: b_in[15:0][7:0] -> bits [c*8+7 : c*8] = b_in[c].
+    SV packed array mapping: b_in[15:0][8:0] -> bits [c*9+8 : c*9] = b_in[c].
     """
     val = 0
     for c in range(COLS):
-        byte = int(arr[c]) & 0xFF
-        val |= byte << (c * 8)
+        lane = int(arr[c]) & 0x1FF
+        val |= lane << (c * 9)
     return val
 
 
