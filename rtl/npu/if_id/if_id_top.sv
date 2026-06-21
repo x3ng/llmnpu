@@ -64,13 +64,20 @@ module if_id_top (
     wire is_nop      = (opcode == 8'hFF);
     wire target_known = target_gemm || target_valu || target_sfu || target_dma ||
                         is_sync || is_wfi || is_nop;
+    wire [3:0] sync_mask = id_instr[3:0];
+    wire sync_gemm_wait = (sync_mask == 4'd0 || sync_mask[0]) && gemm_busy;
+    wire sync_valu_wait = (sync_mask == 4'd0 || sync_mask[1]) && valu_busy;
+    wire sync_sfu_wait  = (sync_mask == 4'd0 || sync_mask[2]) && sfu_busy;
+    wire sync_dma_wait  = (sync_mask == 4'd0 || sync_mask[3]) && dma_busy;
+    wire sync_wait_busy = sync_gemm_wait || sync_valu_wait ||
+                          sync_sfu_wait || sync_dma_wait;
 
     wire busy_stall_w = id_valid && (
         (target_gemm && gemm_busy) ||
         (target_valu && valu_busy) ||
         (target_sfu  && sfu_busy)  ||
         (target_dma  && dma_busy)  ||
-        (is_sync && (gemm_busy || valu_busy || sfu_busy || dma_busy))
+        (is_sync && sync_wait_busy)
     );
     wire dispatch_wfi = id_valid && is_wfi && !halted;
     wire stall_w = halted || halt || busy_stall_w || !fetch_ready;

@@ -358,6 +358,65 @@ async def test_sync_stall(dut):
 
 
 @cocotb.test()
+async def test_sync_mask_ignores_unselected_busy_sources(dut):
+    """SYNC mask bits select which units participate in the barrier."""
+    await setup_reset(dut)
+
+    # Mask bit1 waits for VALU only. GEMM busy must not stall this SYNC.
+    await load_instrs(dut, [
+        0xF0000002,  # SYNC mask=VALU
+        NOP,
+    ])
+
+    dut.gemm_busy.value = 1
+    dut.valu_busy.value = 0
+    dut.rst_n.value = 1
+    await Timer(1, unit='ns')
+
+    await RisingEdge(dut.clk)
+    await RisingEdge(dut.clk)
+    await ReadOnly()
+    assert not int(dut.stall_if.value), \
+        "SYNC mask=VALU stalled on unselected GEMM busy"
+    assert not int(dut.illegal_cmd_valid.value), \
+        "masked SYNC should not report illegal instruction"
+
+    dut._log.info("PASS: SYNC mask ignores unselected busy sources")
+
+
+@cocotb.test()
+async def test_sync_mask_waits_for_selected_busy_source(dut):
+    """SYNC mask stalls when the selected unit is busy."""
+    await setup_reset(dut)
+
+    await load_instrs(dut, [
+        0xF0000002,  # SYNC mask=VALU
+        NOP,
+    ])
+
+    dut.valu_busy.value = 1
+    dut.rst_n.value = 1
+    await Timer(1, unit='ns')
+
+    await RisingEdge(dut.clk)
+    await RisingEdge(dut.clk)
+    await ReadOnly()
+    assert int(dut.stall_if.value), \
+        "SYNC mask=VALU did not stall on selected VALU busy"
+    assert int(dut.debug_instr.value) == 0xF0000002, \
+        "SYNC instruction should remain in decode while selected unit is busy"
+    await Timer(1, unit='ns')
+
+    dut.valu_busy.value = 0
+    await RisingEdge(dut.clk)
+    await ReadOnly()
+    assert not int(dut.stall_if.value), \
+        "SYNC mask=VALU did not release after VALU became idle"
+
+    dut._log.info("PASS: SYNC mask waits for selected busy source")
+
+
+@cocotb.test()
 async def test_wfi_halts_dispatch(dut):
     """WFI stops the IF/ID stream; later instructions must not dispatch."""
     await setup_reset(dut)

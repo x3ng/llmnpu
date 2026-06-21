@@ -77,6 +77,20 @@ module dispatch (
     assign is_sync     = (opcode == 8'hF0);
     assign is_wfi      = (opcode == 8'hF1);
     assign is_nop      = (opcode == 8'hFF);
+    wire [3:0] sync_mask;
+    wire sync_gemm_wait;
+    wire sync_valu_wait;
+    wire sync_sfu_wait;
+    wire sync_dma_wait;
+    wire sync_wait_busy;
+
+    assign sync_mask = id_instr[3:0];
+    assign sync_gemm_wait = (sync_mask == 4'd0 || sync_mask[0]) && gemm_busy;
+    assign sync_valu_wait = (sync_mask == 4'd0 || sync_mask[1]) && valu_busy;
+    assign sync_sfu_wait  = (sync_mask == 4'd0 || sync_mask[2]) && sfu_busy;
+    assign sync_dma_wait  = (sync_mask == 4'd0 || sync_mask[3]) && dma_busy;
+    assign sync_wait_busy = sync_gemm_wait || sync_valu_wait ||
+                            sync_sfu_wait || sync_dma_wait;
 
     // ---- stall logic (combinational) ----
     wire stall_internal;
@@ -85,7 +99,7 @@ module dispatch (
         (target_valu && valu_busy) ||
         (target_sfu  && sfu_busy)  ||
         (target_dma  && dma_busy)  ||
-        (is_sync && (gemm_busy || valu_busy || sfu_busy || dma_busy))
+        (is_sync && sync_wait_busy)
     );
 
     // ---- single always_ff for all state ----
