@@ -1211,12 +1211,18 @@ module npu_top #(
         .ready        (pp_sfu_ready)
     );
 
-    assign pp_gemm_a_fill    = 1'b0;
+    wire dma_bridge_copy_done = (dma_br_state == DMA_BR_COPY) &&
+                                (dma_br_next == DMA_BR_IDLE);
+    wire dma_target_asram = (csr_dma_sram_addr[15:12] == 4'h0);
+    wire dma_target_wsram = (csr_dma_sram_addr[15:12] == 4'h1);
+    wire dma_target_osram = (csr_dma_sram_addr[15:12] == 4'h2);
+
+    assign pp_gemm_a_fill    = dma_bridge_copy_done && dma_target_asram;
     assign pp_gemm_a_consume = gemm_done;
-    assign pp_gemm_b_fill    = 1'b0;
+    assign pp_gemm_b_fill    = dma_bridge_copy_done && dma_target_wsram;
     assign pp_gemm_b_consume = gemm_done;
     assign pp_gemm_p_fill    = gemm_psum_valid;
-    assign pp_gemm_p_consume = 1'b0;
+    assign pp_gemm_p_consume = prefill_done && dma_target_osram;
     assign pp_valu_fill      = 1'b0;
     assign pp_valu_consume   = valu_done;
     assign pp_sfu_fill       = 1'b0;

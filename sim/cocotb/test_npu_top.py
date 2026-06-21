@@ -101,6 +101,19 @@ async def csr_read(dut, addr_word):
     return val
 
 
+async def wait_csr_idle_after_busy(dut, timeout_cycles=500):
+    busy_seen = False
+    for _ in range(timeout_cycles):
+        await RisingEdge(dut.clk)
+        await Timer(1, unit="ps")
+        busy = (await csr_read(dut, CSR_STATUS)) & 1
+        if busy:
+            busy_seen = True
+        if busy_seen and not busy:
+            return
+    raise AssertionError("CSR busy did not assert and return idle")
+
+
 async def if_load(dut, addr, instr):
     """Load a 32-bit instruction into IF/ID imem at given address."""
     dut.dbg_imem_we.value = 1
@@ -759,6 +772,41 @@ async def test_csr_dma_2d_load_copy_strided(dut):
         "2D LOAD bridge wrote the first SRAM stride gap"
     )
     dut._log.info("PASS: CSR DMA 2D LOAD bridge copy uses SRAM stride")
+
+
+@cocotb.test()
+async def test_dma_load_marks_gemm_pingpong_inputs_ready(dut):
+    """DMA LOAD completion marks GEMM A/B ping-pong input banks ready."""
+    await setup_dut(dut)
+
+    dut.rst_n.value = 1
+    await RisingEdge(dut.clk)
+    await Timer(1, unit="ps")
+
+    await csr_write(dut, CSR_CTRL, CSR_CTRL_RESET)
+    await csr_write(dut, CSR_CTRL, 0)
+
+    assert int(dut.pp_gemm_a_ready.value) == 0, "GEMM A ping-pong ready after reset"
+    assert int(dut.pp_gemm_b_ready.value) == 0, "GEMM B ping-pong ready after reset"
+
+    await csr_write(dut, CSR_DMA_CSR0, 0x00000A00)
+    await csr_write(dut, CSR_DMA_CSR1, ASRAM_BASE)
+    await csr_write(dut, CSR_DMA_CSR2, 8)
+    await csr_write(dut, CSR_DMA_CSR3, DMA_CSR3_START)
+    await wait_csr_idle_after_busy(dut)
+
+    assert int(dut.pp_gemm_a_ready.value) == 1, "ASRAM DMA LOAD did not fill GEMM A ping-pong"
+    assert int(dut.pp_gemm_a_active_bank.value) == 0, "first GEMM A fill should select bank 0"
+
+    await csr_write(dut, CSR_DMA_CSR0, 0x00000B00)
+    await csr_write(dut, CSR_DMA_CSR1, WSRAM_BASE)
+    await csr_write(dut, CSR_DMA_CSR2, 8)
+    await csr_write(dut, CSR_DMA_CSR3, DMA_CSR3_START)
+    await wait_csr_idle_after_busy(dut)
+
+    assert int(dut.pp_gemm_b_ready.value) == 1, "WSRAM DMA LOAD did not fill GEMM B ping-pong"
+    assert int(dut.pp_gemm_b_active_bank.value) == 0, "first GEMM B fill should select bank 0"
+    dut._log.info("PASS: DMA LOAD marks GEMM A/B ping-pong inputs ready")
 
 
 @cocotb.test()
