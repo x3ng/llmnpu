@@ -574,6 +574,9 @@ module npu_top #(
     logic [15:0] gpl_o_base;
     logic [7:0]  gpl_k_count;
     logic [4:0]  gpl_k_tiles;
+    logic [4:0]  gpl_out_scale_shr;
+    logic signed [15:0] gpl_out_scale_mul;
+    logic        gpl_relu;
     logic        gpl_desc_valid;
 
     assign gemm_k_count = gpl_k_count;
@@ -651,6 +654,9 @@ module npu_top #(
             gpl_o_base             <= `OSRAM_BASE;
             gpl_k_count            <= 8'd16;
             gpl_k_tiles            <= 5'd1;
+            gpl_out_scale_shr      <= 5'd0;
+            gpl_out_scale_mul      <= 16'sd1;
+            gpl_relu               <= 1'b0;
             gpl_desc_valid         <= 1'b0;
             for (int r = 0; r < 16; r++) begin
                 gpl_a_row[r] <= 128'd0;
@@ -689,6 +695,19 @@ module npu_top #(
                         if (gpl_desc_valid)
                             gpl_o_base <= {xbar_m1_rdata[3:0], 12'd0};
                     end
+                    3'd3: begin
+                        if (gpl_desc_valid) begin
+                            gpl_out_scale_shr <= (xbar_m1_rdata[23:8] > 16'd31) ? 5'd31 :
+                                                 xbar_m1_rdata[12:8];
+                            gpl_out_scale_mul[7:0] <= xbar_m1_rdata[31:24];
+                        end
+                    end
+                    3'd4: begin
+                        if (gpl_desc_valid) begin
+                            gpl_out_scale_mul[15:8] <= xbar_m1_rdata[7:0];
+                            gpl_relu <= |xbar_m1_rdata[15:8];
+                        end
+                    end
                     default: begin
                     end
                 endcase
@@ -710,6 +729,9 @@ module npu_top #(
                         gpl_k_count          <= (gemm_issue_cmd[7:0] == 8'd0) ? 8'd16 :
                                                 gemm_issue_cmd[7:0];
                         gpl_k_tiles          <= 5'd1;
+                        gpl_out_scale_shr    <= 5'd0;
+                        gpl_out_scale_mul    <= 16'sd1;
+                        gpl_relu             <= 1'b0;
                         gpl_desc_valid       <= 1'b0;
                     end
                 end
@@ -846,14 +868,34 @@ module npu_top #(
             wb_psum_buf <= gemm_psum;
     end
 
+    function automatic logic [15:0] gemm_postprocess(input logic [15:0] psum);
+        logic signed [15:0] psum_s;
+        logic signed [31:0] scaled;
+        logic signed [31:0] shifted;
+        begin
+            psum_s = psum;
+            scaled = psum_s * gpl_out_scale_mul;
+            shifted = scaled >>> gpl_out_scale_shr;
+            if (gpl_relu && shifted < 32'sd0)
+                shifted = 32'sd0;
+
+            if (shifted > 32'sd32767)
+                gemm_postprocess = 16'h7FFF;
+            else if (shifted < -32'sd32768)
+                gemm_postprocess = 16'h8000;
+            else
+                gemm_postprocess = shifted[15:0];
+        end
+    endfunction
+
     wire [31:0] wb_word_arr [0:127];
     genvar wi, wj;
     generate
         for (wi = 0; wi < 16; wi++) begin : wb_row_gen
             for (wj = 0; wj < 8; wj++) begin : wb_col_gen
                 assign wb_word_arr[wi*8 + wj] = {
-                    wb_psum_buf[wi][wj*2 + 1],
-                    wb_psum_buf[wi][wj*2]
+                    gemm_postprocess(wb_psum_buf[wi][wj*2 + 1]),
+                    gemm_postprocess(wb_psum_buf[wi][wj*2])
                 };
             end
         end

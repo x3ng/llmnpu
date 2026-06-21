@@ -290,7 +290,7 @@ async def test_csr_gemm_fetches_descriptor(dut):
 
 @cocotb.test()
 async def test_csr_gemm_k2_computes_from_descriptor(dut):
-    """CSR GEMM with descriptor K=2 tiles computes a 16x16x32 product."""
+    """CSR GEMM with descriptor K=2 tiles applies scale and ReLU."""
     await setup_dut(dut)
 
     dut.rst_n.value = 1
@@ -322,8 +322,8 @@ async def test_csr_gemm_k2_computes_from_descriptor(dut):
     dsram_write_word(dut, DSRAM_BASE + 0, 0x00010001)  # M=1, N=1
     dsram_write_word(dut, DSRAM_BASE + 4, 0x01000002)  # K=2, A=0, B=1
     dsram_write_word(dut, DSRAM_BASE + 8, 0x00000002)  # O=2
-    dsram_write_word(dut, DSRAM_BASE + 12, 0x00000000)
-    dsram_write_word(dut, DSRAM_BASE + 16, 0x00000000)
+    dsram_write_word(dut, DSRAM_BASE + 12, 0x02000100)  # shr=1, mul low=2
+    dsram_write_word(dut, DSRAM_BASE + 16, 0x00000100)  # mul high=0, relu=1
     await Timer(1, unit="ps")
 
     await csr_write(dut, CSR_DESC_PTR, DSRAM_BASE)
@@ -352,7 +352,10 @@ async def test_csr_gemm_k2_computes_from_descriptor(dut):
             word = osram_read_word(dut, OSRAM_BASE + r * 32 + (c // 2) * 4)
             raw = (word >> (16 * (c & 1))) & 0xFFFF
             got = raw if raw < 0x8000 else raw - 0x10000
-            exp = _sat16(sum(a_mat[r][k] * b_mat[k][c] for k in range(k_count)))
+            acc = sum(a_mat[r][k] * b_mat[k][c] for k in range(k_count))
+            exp = _sat16((acc * 2) >> 1)
+            if exp < 0:
+                exp = 0
             if got != exp:
                 mismatches.append((r, c, got, exp))
 
@@ -360,7 +363,7 @@ async def test_csr_gemm_k2_computes_from_descriptor(dut):
         f"K=2 CSR GEMM mismatches: {mismatches[:8]} "
         f"total={len(mismatches)}"
     )
-    dut._log.info("PASS: CSR GEMM K=2 descriptor computes correct 16x16x32 result")
+    dut._log.info("PASS: CSR GEMM K=2 descriptor applies scale and ReLU")
 
 
 @cocotb.test()
