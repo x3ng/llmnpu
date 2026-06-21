@@ -20,8 +20,9 @@ typedef struct {
     uint8_t        out_scale_shr;  // requant right-shift
 } npu_gemm_args_t;
 
-// --- GEMM descriptor — bit-exact match of the SystemVerilog packed struct
-//     from rtl/include/isa_defines.svh (152 bits = 19 bytes packed) ---
+// --- GEMM descriptor — bit-exact match of the current RTL fetch layout.
+//     Note: this legacy runtime layout is 19 bytes packed; the descriptor
+//     loader pads DMA transfers to 64-bit alignment.
 typedef struct {
     uint16_t M, N, K;               // tile counts (each x16)
                                     // Current RTL issue consumes one M/N tile;
@@ -31,7 +32,7 @@ typedef struct {
     uint8_t  o_sram_bank;           // output    SRAM bank index
     uint8_t  a_zp, b_zp;            // INT8 zero points
     uint16_t reserved;              // reserved (zero)
-    uint16_t out_scale_shr;         // INT16→INT8 requant right-shift
+    uint16_t out_scale_shr;         // INT16->INT8 requant right-shift
     int16_t  out_scale_mul;         // requant multiplier (signed)
     uint8_t  relu;                  // post-GEMM ReLU flag
     uint8_t  out_zp;                // output zero point

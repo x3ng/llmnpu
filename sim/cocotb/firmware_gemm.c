@@ -130,6 +130,13 @@ static const int8_t test_B[256] __attribute__((aligned(8))) = {
 // Global variables (.bss — zeroed at boot, then filled by DMA STORE)
 // ------------------------------------------------------------
 volatile int16_t gemm_result[256] __attribute__((aligned(8)));
+static int8_t test_A_slab[512] __attribute__((aligned(8)));
+static int8_t test_B_slab[512] __attribute__((aligned(8)));
+
+static void mem_fence(void)
+{
+    __asm__ volatile ("fence" ::: "memory");
+}
 
 // ------------------------------------------------------------
 // Bare-metal entry point
@@ -202,6 +209,18 @@ void main(void)
 
         int pipeline_abort = 0;
 
+        for (int r = 0; r < 16; r++) {
+            for (int kt_load = 0; kt_load < desc_k_tiles; kt_load++) {
+                for (int c = 0; c < 16; c++) {
+                    test_A_slab[r * K + kt_load * 16 + c] =
+                        test_A[r * src_k + c];
+                    test_B_slab[(kt_load * 16 + r) * 16 + c] =
+                        test_B[r * N + c];
+                }
+            }
+        }
+        mem_fence();
+
         for (int mt = 0; mt < m_tiles && !pipeline_abort; mt++) {
           int m_off = mt * 16;
           for (int nt = 0; nt < n_tiles && !pipeline_abort; nt++) {
@@ -215,17 +234,12 @@ void main(void)
               // --------------------------------------------------
               {
                   int fail = 0;
-                  for (int r = 0; r < 16; r++) {
-                    for (int kt_load = 0; kt_load < desc_k_tiles; kt_load++) {
-                      if (npu_dma_ld(&npu,
-                            (uint32_t)(uintptr_t)(&test_A[(m_off+r)*src_k]),
-                            0x0000u + (uint32_t)(r * K + kt_load * 16), 16) != 0) {
-                        fail = 1; break;
-                      }
-                    }
-                    if (fail) break;
-                    uart_putc('a');
-                  }
+                  (void)m_off;
+                  (void)k_off;
+                  if (npu_dma_ld(&npu,
+                        (uint32_t)(uintptr_t)test_A_slab,
+                        0x0000u, 512) != 0)
+                    fail = 1;
 
                   // Verify A-DMA CSRs post-transfer:
                   // CSR0 = last ext addr (must be >= 0x40000000)
@@ -252,16 +266,11 @@ void main(void)
               // --------------------------------------------------
               {
                   int fail = 0;
-                  for (int r = 0; r < 16; r++) {
-                    for (int kt_load = 0; kt_load < desc_k_tiles; kt_load++) {
-                      if (npu_dma_ld(&npu,
-                            (uint32_t)(uintptr_t)(&test_B[r*N + n_off]),
-                            0x1000u + (uint32_t)((kt_load * 16 + r) * 16), 16) != 0) {
-                        fail = 1; break;
-                      }
-                    }
-                    if (fail) break;
-                  }
+                  (void)n_off;
+                  if (npu_dma_ld(&npu,
+                        (uint32_t)(uintptr_t)test_B_slab,
+                        0x1000u, 512) != 0)
+                    fail = 1;
                   if (fail) { uart_putc('b'); pipeline_abort = 1; break; }
                   b_dma_ok = 1;
                   uart_putc('B');

@@ -30,8 +30,8 @@ LOG_FILTER ?= PASS|FAIL|ERROR|UART|timeout|Timeout|wfi|WFI|trap|TRAP|mismatch|MI
 include $(shell cocotb-config --makefiles)/Makefile.sim
 
 .PHONY: test_pe test_gemm test_valu test_sfu test_dma test_dma_load test_memory test_if_id test_pingpong test_npu_top
-.PHONY: test_e2e test_e2e_csr test_e2e_boot test_e2e_gemm test_e2e_dma test_e2e_program
-.PHONY: rebuild_e2e_gemm e2e_gemm_log e2e_dma_log e2e_boot_log e2e_csr_log e2e_program_log e2e_log test_quick test_all clean
+.PHONY: test_e2e test_e2e_csr test_e2e_boot test_e2e_gemm test_e2e_dma test_e2e_program test_e2e_contract
+.PHONY: rebuild_e2e_gemm e2e_gemm_log e2e_dma_log e2e_contract_log e2e_boot_log e2e_csr_log e2e_program_log e2e_log test_quick test_all clean
 
 # ── Shared variables for all E2E (SoC-level) targets ──
 
@@ -212,6 +212,21 @@ test_e2e_dma:
 
 # ── E2E Stage 4: GEMM (Verilator) ──
 
+test_e2e_contract: SIM_BUILD = sim_build_e2e_contract
+test_e2e_contract:
+	@rm -rf $(SIM_BUILD)
+	$(call build_fw,firmware_contract, \
+		$(SIM_DIR)/cocotb/firmware_contract.c \
+		$(REPO_ROOT)/sw/driver/npu_driver.c, \
+		-std=gnu99 -I$(REPO_ROOT)/sw/driver)
+	PYTHONPATH=$(SIM_DIR)/cocotb:$$PYTHONPATH \
+	MODULE=test_e2e_contract TOPLEVEL=top_soc \
+	VERILOG_SOURCES="$(E2E_RTL)" \
+	$(MAKE) COMPILE_ARGS='$(E2E_COMPILE_ARGS)' \
+		2>&1 | tee $(SIM_BUILD)/test.log
+
+# ── E2E Stage 4: GEMM (Verilator) ──
+
 test_e2e_gemm: SIM_BUILD = sim_build_e2e_gemm
 test_e2e_gemm: SIM = verilator
 test_e2e_gemm:
@@ -347,6 +362,9 @@ e2e_csr_log:
 
 e2e_dma_log:
 	$(call show_log,sim_build_e2e_dma/test.log)
+
+e2e_contract_log:
+	$(call show_log,sim_build_e2e_contract/test.log)
 
 e2e_gemm_log:
 	$(call show_log,sim_build_e2e_gemm/test.log)
