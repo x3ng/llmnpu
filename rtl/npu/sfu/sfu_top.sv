@@ -5,6 +5,7 @@
 // quant_dequant (INT8 quantise/dequantise).
 //
 // Opcode routing  (from isa_defines.svh):
+//   OP_ACT_RELU    (0x20)  →  integer ReLU
 //   OP_ACT_GELU    (0x21)  →  LUT engine, func_sel=0
 //   OP_ACT_SIGMOID (0x22)  →  LUT engine, func_sel=1
 //   OP_ACT_TANH    (0x23)  →  LUT engine, func_sel=2
@@ -63,6 +64,34 @@ module sfu_top (
     );
 
     // ------------------------------------------------------------------
+    // ReLU path  (integer clamp, aligned to LUT path)
+    // ------------------------------------------------------------------
+    logic [7:0] relu_y;
+    logic       relu_valid;
+    logic [7:0] relu_y_aligned;
+    logic       relu_valid_aligned;
+
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            relu_y     <= 8'd0;
+            relu_valid <= 1'b0;
+        end else begin
+            relu_y     <= x_in[7] ? 8'd0 : x_in;
+            relu_valid <= valid_in;
+        end
+    end
+
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            relu_y_aligned     <= 8'd0;
+            relu_valid_aligned <= 1'b0;
+        end else begin
+            relu_y_aligned     <= relu_y;
+            relu_valid_aligned <= relu_valid;
+        end
+    end
+
+    // ------------------------------------------------------------------
     // Quant/Dequant path  (3-cycle pipeline)
     // ------------------------------------------------------------------
     logic        qd_valid;
@@ -114,6 +143,10 @@ module sfu_top (
             valid_out <= 1'b0;
         end else begin
             unique case (opcode)
+                `OP_ACT_RELU: begin
+                    y_out    <= relu_y_aligned;
+                    valid_out <= relu_valid_aligned;
+                end
                 `OP_ACT_GELU,
                 `OP_ACT_SIGMOID,
                 `OP_ACT_TANH: begin

@@ -879,6 +879,40 @@ async def test_csr_halt_stalls_ifid_only(dut):
 
 
 @cocotb.test()
+async def test_ifid_relu_sfu_completes(dut):
+    """IF/ID OP_ACT_RELU routes through SFU and returns to idle."""
+    await setup_dut(dut)
+
+    dut.rst_n.value = 1
+    await RisingEdge(dut.clk)
+    await Timer(1, unit="ps")
+
+    await csr_write(dut, CSR_CTRL, CSR_CTRL_RESET)
+    await if_load(dut, 0, (OP_ACT_RELU << 24))
+    await if_load(dut, 1, (OP_WFI << 24))
+    await csr_write(dut, CSR_CTRL, CSR_CTRL_START)
+
+    busy_seen = False
+    valid_seen = False
+    idle_seen = False
+    for _ in range(40):
+        await RisingEdge(dut.clk)
+        await Timer(1, unit="ps")
+        if int(dut.sfu_busy.value):
+            busy_seen = True
+        if int(dut.sfu_valid_out.value):
+            valid_seen = True
+        if busy_seen and not int(dut.sfu_busy.value):
+            idle_seen = True
+            break
+
+    assert busy_seen, "IF/ID ReLU did not make SFU busy"
+    assert valid_seen, "IF/ID ReLU did not produce SFU valid_out"
+    assert idle_seen, "SFU did not return idle after IF/ID ReLU"
+    dut._log.info("PASS: IF/ID ReLU routes through SFU and completes")
+
+
+@cocotb.test()
 async def test_valu_integration(dut):
     """Test 2: VALU VADD via IF/ID dispatch pipeline.
 

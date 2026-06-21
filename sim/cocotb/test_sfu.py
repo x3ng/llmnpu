@@ -21,6 +21,7 @@ import random
 # ── Opcode constants (must match isa_defines.svh) ──────────────────────
 
 OP_ACT_GELU    = 0x21
+OP_ACT_RELU    = 0x20
 OP_ACT_SIGMOID = 0x22
 OP_ACT_TANH    = 0x23
 OP_QUANT       = 0x30
@@ -150,6 +151,43 @@ async def _test_activation(dut, opcode, func_name, golden_fn,
 
 
 # ── Tests ──────────────────────────────────────────────────────────────
+
+@cocotb.test()
+async def test_sfu_relu(dut):
+    """SFU ReLU: negative INT8 values clamp to zero, positive values pass."""
+    clock = Clock(dut.clk, 2, unit="ns")
+    cocotb.start_soon(clock.start())
+    dut.opcode.value  = 0
+    dut.x_in.value    = 0
+    dut.zp.value      = 0
+    dut.scale_mul.value = 0
+    dut.scale_shr.value = 0
+    dut.valid_in.value = 0
+    await reset_dut(dut)
+
+    for x in [-128, -17, -1, 0, 1, 42, 127]:
+        dut.opcode.value = OP_ACT_RELU
+        dut.x_in.value = x & 0xFF
+        dut.valid_in.value = 1
+        await RisingEdge(dut.clk)
+        dut.valid_in.value = 0
+
+        valid_seen = False
+        for _ in range(SFU_LATENCY + 2):
+            await RisingEdge(dut.clk)
+            if int(dut.valid_out.value):
+                valid_seen = True
+                break
+
+        assert valid_seen, f"ReLU x={x}: valid_out did not assert"
+        expected = max(0, x)
+        actual = dut.y_out.value.to_signed()
+        assert actual == expected, (
+            f"ReLU x={x}: expected {expected}, got {actual}"
+        )
+
+    dut._log.info("  ReLU: all vectors PASS")
+
 
 @cocotb.test()
 async def test_sfu_gelu(dut):
