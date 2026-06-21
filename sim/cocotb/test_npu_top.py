@@ -186,6 +186,25 @@ async def wait_gemm_idle_after_busy(dut, timeout_cycles=2000):
     )
 
 
+async def wait_sfu_idle_after_busy(dut, timeout_cycles=1200):
+    busy_seen = False
+    done_seen = False
+    for _ in range(timeout_cycles):
+        await RisingEdge(dut.clk)
+        await Timer(1, unit="ps")
+        if int(dut.sfu_busy.value):
+            busy_seen = True
+        if int(dut.sfu_mem_relu_done.value):
+            done_seen = True
+        if busy_seen and not int(dut.sfu_busy.value):
+            assert done_seen, "SFU postprocess went idle without done pulse"
+            return
+    raise AssertionError(
+        f"SFU postprocess did not complete: busy_seen={busy_seen} "
+        f"done_seen={done_seen} state={int(dut.sfu_mem_state.value)}"
+    )
+
+
 async def if_load(dut, addr, instr):
     """Load a 32-bit instruction into IF/ID imem at given address."""
     dut.dbg_imem_we.value = 1
@@ -1331,6 +1350,103 @@ async def test_full_pingpong_two_tile_dma_gemm_store_flow(dut):
         f"tile1 output mismatches: {c1_mismatches[:8]} total={len(c1_mismatches)}"
     )
     dut._log.info("PASS: full ping-pong two-tile DMA/GEMM/STORE flow")
+
+
+@cocotb.test()
+async def test_npu_module_functional_contract_multi_tile_postprocess_irq(dut):
+    """NPU module contract: multi-tile ping-pong, optional SFU, STORE, IRQ."""
+    await setup_dut(dut)
+
+    dut.rst_n.value = 1
+    await RisingEdge(dut.clk)
+    await Timer(1, unit="ps")
+
+    await csr_write(dut, CSR_CTRL, CSR_CTRL_RESET)
+    for i in range(4):
+        await if_load(dut, i, (OP_WFI << 24))
+    await csr_write(dut, CSR_IRQ_EN, IRQ_DONE)
+    await csr_write(dut, CSR_IRQ_STAT, 0xFFFFFFFF)
+    await csr_write(dut, CSR_CTRL, 0)
+    await ClockCycles(dut.clk, 2)
+
+    a0_ext = 0x00004A00
+    b0_ext = 0x00005A00
+    c0_ext = 0x00006A00
+    a1_ext = 0x00004C00
+    b1_ext = 0x00005C00
+    c1_ext = 0x00006C00
+
+    dma_ext_write_i8_tile(dut, a0_ext, [[-1 for _ in range(16)] for _ in range(16)])
+    dma_ext_write_i8_tile(dut, b0_ext, [[1 for _ in range(16)] for _ in range(16)])
+    dma_ext_write_i8_tile(dut, a1_ext, [[2 for _ in range(16)] for _ in range(16)])
+    dma_ext_write_i8_tile(dut, b1_ext, [[1 for _ in range(16)] for _ in range(16)])
+    await Timer(1, unit="ps")
+
+    await start_dma_load_and_collect_copy_addrs(
+        dut, a0_ext, ASRAM_BASE, 256, timeout_cycles=2000)
+    await start_dma_load_and_collect_copy_addrs(
+        dut, a1_ext, ASRAM_BASE, 256, timeout_cycles=2000)
+    await start_dma_load_and_collect_copy_addrs(
+        dut, b0_ext, WSRAM_BASE, 256, timeout_cycles=2000)
+    await start_dma_load_and_collect_copy_addrs(
+        dut, b1_ext, WSRAM_BASE, 256, timeout_cycles=2000)
+
+    assert int(dut.pp_gemm_a_ready.value) == 1
+    assert int(dut.pp_gemm_b_ready.value) == 1
+    assert int(dut.pp_gemm_a_active_bank.value) == 0
+    assert int(dut.pp_gemm_b_active_bank.value) == 0
+
+    dsram_write_word(dut, DSRAM_BASE + 0, 0x00010001)
+    dsram_write_word(dut, DSRAM_BASE + 4, 0x01000001)
+    dsram_write_word(dut, DSRAM_BASE + 8, 0x00000002)
+    dsram_write_word(dut, DSRAM_BASE + 12, 0x01000000)
+    dsram_write_word(dut, DSRAM_BASE + 16, 0x00000000)
+    await Timer(1, unit="ps")
+
+    await csr_write(dut, CSR_DESC_PTR, DSRAM_BASE)
+    await csr_write(dut, CSR_CTRL, ctrl_start(OP_GEMM))
+    await wait_gemm_idle_after_busy(dut, timeout_cycles=2200)
+    assert osram_read_word(dut, OSRAM_BASE) == 0xFFF0FFF0
+    assert int(dut.pp_gemm_a_active_bank.value) == 1
+    assert int(dut.pp_gemm_b_active_bank.value) == 1
+    assert int(dut.pp_gemm_p_active_bank.value) == 0
+
+    await csr_write(dut, CSR_CTRL, ctrl_start(OP_ACT_RELU))
+    await wait_sfu_idle_after_busy(dut, timeout_cycles=1200)
+    assert osram_read_word(dut, OSRAM_BASE) == 0x00000000
+
+    await csr_write(dut, CSR_CTRL, ctrl_start(OP_GEMM))
+    await wait_gemm_idle_after_busy(dut, timeout_cycles=2200)
+    assert osram_read_word(dut, OSRAM_BASE + PP_GEMM_P_SIZE) == 0x00200020
+
+    await start_dma_store_and_collect_prefill_addrs(
+        dut, c0_ext, OSRAM_BASE, 512, timeout_cycles=2200)
+    assert int(dut.pp_gemm_p_active_bank.value) == 1
+    await start_dma_store_and_collect_prefill_addrs(
+        dut, c1_ext, OSRAM_BASE, 512, timeout_cycles=2200)
+
+    c0_mismatches = check_dma_ext_i16_tile_constant(dut, c0_ext, 0)
+    c1_mismatches = check_dma_ext_i16_tile_constant(dut, c1_ext, 32)
+    assert not c0_mismatches, (
+        f"contract tile0 output mismatches: {c0_mismatches[:8]} total={len(c0_mismatches)}"
+    )
+    assert not c1_mismatches, (
+        f"contract tile1 output mismatches: {c1_mismatches[:8]} total={len(c1_mismatches)}"
+    )
+
+    irq_stat = await csr_read(dut, CSR_IRQ_STAT)
+    assert irq_stat & IRQ_DONE, f"IRQ_DONE not set after module flow: 0x{irq_stat:08X}"
+    assert int(dut.irq.value) == 1, "IRQ output not asserted after module flow"
+    status = await csr_read(dut, CSR_STATUS)
+    assert (status & 1) == 0, f"NPU busy after module flow: status=0x{status:08X}"
+
+    await csr_write(dut, CSR_IRQ_STAT, IRQ_DONE)
+    irq_stat_after_clear = await csr_read(dut, CSR_IRQ_STAT)
+    assert not (irq_stat_after_clear & IRQ_DONE), (
+        f"IRQ_DONE W1C failed: 0x{irq_stat_after_clear:08X}"
+    )
+    assert int(dut.irq.value) == 0, "IRQ output stayed asserted after W1C clear"
+    dut._log.info("PASS: NPU module functional contract multi-tile/postprocess/IRQ")
 
 
 @cocotb.test()
