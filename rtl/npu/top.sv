@@ -248,6 +248,12 @@ module npu_top #(
     logic pp_gemm_b_fill_bank, pp_gemm_b_active_bank, pp_gemm_b_ready;
     logic pp_gemm_p_fill, pp_gemm_p_consume;
     logic pp_gemm_p_fill_bank, pp_gemm_p_active_bank, pp_gemm_p_ready;
+    logic pp_valu_fill, pp_valu_consume;
+    logic pp_valu_fill_bank, pp_valu_active_bank, pp_valu_ready;
+    logic pp_sfu_in_fill, pp_sfu_in_consume;
+    logic pp_sfu_in_fill_bank, pp_sfu_in_active_bank, pp_sfu_in_ready;
+    logic pp_sfu_out_fill, pp_sfu_out_consume;
+    logic pp_sfu_out_fill_bank, pp_sfu_out_active_bank, pp_sfu_out_ready;
 
     assign csr_gemm_start   = csr_start && (csr_issue_opcode == `OP_GEMM);
     assign if_gemm_desc_start = gemm_cmd_valid &&
@@ -345,11 +351,12 @@ module npu_top #(
     logic        csr_sfu_start;
     logic        sfu_issue_valid;
 
-    assign csr_sfu_start = csr_start && (csr_issue_opcode == `OP_ACT_RELU) && pp_gemm_p_ready;
+    assign csr_sfu_start = csr_start && (csr_issue_opcode == `OP_ACT_RELU) &&
+                           (pp_gemm_p_ready || pp_sfu_in_ready);
     assign sfu_issue_valid = sfu_cmd_valid || csr_sfu_start;
     assign sfu_opcode = csr_sfu_start ? `OP_ACT_RELU : sfu_cmd[31:24];
     assign sfu_x_in   = sfu_cmd[7:0];
-    assign sfu_mem_relu_start = sfu_issue_valid && (sfu_opcode == `OP_ACT_RELU) && pp_gemm_p_ready;
+    assign sfu_mem_relu_start = csr_sfu_start;
     assign sfu_valid_in_gated = sfu_issue_valid && !sfu_mem_relu_start;
 
     sfu_top u_sfu (
@@ -616,12 +623,34 @@ module npu_top #(
     wire dma_target_asram = (csr_dma_sram_addr[15:12] == 4'h0);
     wire dma_target_wsram = (csr_dma_sram_addr[15:12] == 4'h1);
     wire dma_target_osram = (csr_dma_sram_addr[15:12] == 4'h2);
+    localparam logic [15:0] PP_VALU_BASE_OFFSET    = (`PP_GEMM_P_SIZE * 2);
+    localparam logic [15:0] PP_SFU_IN_BASE_OFFSET  = PP_VALU_BASE_OFFSET + (`PP_VALU_SIZE * 2);
+    localparam logic [15:0] PP_SFU_OUT_BASE_OFFSET = PP_SFU_IN_BASE_OFFSET + (`PP_SFU_SIZE * 2);
     localparam logic [15:0] PP_GEMM_A_BANK_OFFSET = `PP_GEMM_A_SIZE;
     localparam logic [15:0] PP_GEMM_B_BANK_OFFSET = `PP_GEMM_B_SIZE;
     localparam logic [15:0] PP_GEMM_P_BANK_OFFSET = `PP_GEMM_P_SIZE;
+    localparam logic [15:0] PP_VALU_BANK_OFFSET = `PP_VALU_SIZE;
+    localparam logic [15:0] PP_SFU_BANK_OFFSET  = `PP_SFU_SIZE;
+    wire [15:0] dma_osram_offset = {4'd0, csr_dma_sram_addr[11:0]};
+    wire dma_target_gemm_p = dma_target_osram && (dma_osram_offset < PP_VALU_BASE_OFFSET);
+    wire dma_target_valu   = dma_target_osram &&
+                             (dma_osram_offset >= PP_VALU_BASE_OFFSET) &&
+                             (dma_osram_offset < PP_SFU_IN_BASE_OFFSET);
+    wire dma_target_sfu_in = dma_target_osram &&
+                             (dma_osram_offset >= PP_SFU_IN_BASE_OFFSET) &&
+                             (dma_osram_offset < PP_SFU_OUT_BASE_OFFSET);
+    wire dma_target_sfu_out = dma_target_osram &&
+                              (dma_osram_offset >= PP_SFU_OUT_BASE_OFFSET) &&
+                              (dma_osram_offset < (PP_SFU_OUT_BASE_OFFSET + (`PP_SFU_SIZE * 2)));
     wire [15:0] dma_gemm_a_fill_offset = pp_gemm_a_fill_bank ? PP_GEMM_A_BANK_OFFSET : 16'd0;
     wire [15:0] dma_gemm_b_fill_offset = pp_gemm_b_fill_bank ? PP_GEMM_B_BANK_OFFSET : 16'd0;
     wire [15:0] dma_gemm_p_active_offset = pp_gemm_p_active_bank ? PP_GEMM_P_BANK_OFFSET : 16'd0;
+    wire [15:0] dma_valu_fill_offset = pp_valu_fill_bank ? PP_VALU_BANK_OFFSET : 16'd0;
+    wire [15:0] dma_valu_active_offset = pp_valu_active_bank ? PP_VALU_BANK_OFFSET : 16'd0;
+    wire [15:0] dma_sfu_in_fill_offset = pp_sfu_in_fill_bank ? PP_SFU_BANK_OFFSET : 16'd0;
+    wire [15:0] dma_sfu_out_active_offset = pp_sfu_out_active_bank ? PP_SFU_BANK_OFFSET : 16'd0;
+    wire [15:0] sfu_in_active_offset = pp_sfu_in_active_bank ? PP_SFU_BANK_OFFSET : 16'd0;
+    wire [15:0] sfu_out_fill_offset = pp_sfu_out_fill_bank ? PP_SFU_BANK_OFFSET : 16'd0;
     wire [15:0] gpl_gemm_a_active_offset = pp_gemm_a_active_bank ? PP_GEMM_A_BANK_OFFSET : 16'd0;
     wire [15:0] gpl_gemm_b_active_offset = pp_gemm_b_active_bank ? PP_GEMM_B_BANK_OFFSET : 16'd0;
     wire [15:0] gemm_p_fill_offset = pp_gemm_p_fill_bank ? PP_GEMM_P_BANK_OFFSET : 16'd0;
@@ -684,9 +713,17 @@ module npu_top #(
                 dma_br_xbar_addr_calc = dma_br_sram_addr_calc + {16'd0, dma_gemm_a_fill_offset};
             else if (dma_target_wsram)
                 dma_br_xbar_addr_calc = dma_br_sram_addr_calc + {16'd0, dma_gemm_b_fill_offset};
+            else if (dma_target_valu)
+                dma_br_xbar_addr_calc = dma_br_sram_addr_calc + {16'd0, dma_valu_fill_offset};
+            else if (dma_target_sfu_in)
+                dma_br_xbar_addr_calc = dma_br_sram_addr_calc + {16'd0, dma_sfu_in_fill_offset};
         end else if (dma_br_state == DMA_BR_PREFILL) begin
-            if (dma_target_osram)
+            if (dma_target_gemm_p)
                 dma_br_xbar_addr_calc = dma_br_sram_addr_calc + {16'd0, dma_gemm_p_active_offset};
+            else if (dma_target_valu)
+                dma_br_xbar_addr_calc = dma_br_sram_addr_calc + {16'd0, dma_valu_active_offset};
+            else if (dma_target_sfu_out)
+                dma_br_xbar_addr_calc = dma_br_sram_addr_calc + {16'd0, dma_sfu_out_active_offset};
         end
         dma_br_word_active = (dma_br_row < dma_br_rows) &&
                              (dma_br_cnt < dma_br_row_bytes);
@@ -1193,7 +1230,11 @@ module npu_top #(
 
     sfu_mem_state_t sfu_mem_state, sfu_mem_next;
     logic [6:0]     sfu_mem_cnt;
-    logic [15:0]    sfu_mem_base;
+    logic [15:0]    sfu_mem_r_base;
+    logic [15:0]    sfu_mem_w_base;
+    logic           sfu_mem_is_p;
+    logic [6:0]     sfu_mem_last;
+    logic           sfu_mem_relu_finish;
 
     function automatic logic [15:0] relu16(input logic [15:0] x);
         begin
@@ -1201,11 +1242,21 @@ module npu_top #(
         end
     endfunction
 
+    function automatic logic [7:0] relu8(input logic [7:0] x);
+        begin
+            relu8 = x[7] ? 8'd0 : x;
+        end
+    endfunction
+
+    assign sfu_mem_last = sfu_mem_is_p ? 7'd127 : 7'd63;
+
     always_ff @(posedge clk or negedge dp_rst_n) begin
         if (!dp_rst_n) begin
             sfu_mem_state       <= SFU_MEM_IDLE;
             sfu_mem_cnt         <= 7'd0;
-            sfu_mem_base        <= `OSRAM_BASE;
+            sfu_mem_r_base      <= `OSRAM_BASE;
+            sfu_mem_w_base      <= `OSRAM_BASE;
+            sfu_mem_is_p        <= 1'b1;
             sfu_mem_relu_active <= 1'b0;
             sfu_mem_relu_done   <= 1'b0;
         end else begin
@@ -1217,7 +1268,15 @@ module npu_top #(
                     sfu_mem_cnt         <= 7'd0;
                     sfu_mem_relu_active <= 1'b0;
                     if (sfu_mem_relu_start) begin
-                        sfu_mem_base        <= gpl_o_base + dma_gemm_p_active_offset;
+                        sfu_mem_is_p        <= pp_gemm_p_ready;
+                        sfu_mem_r_base      <= pp_gemm_p_ready
+                                             ? (gpl_o_base + dma_gemm_p_active_offset)
+                                             : (`OSRAM_BASE + PP_SFU_IN_BASE_OFFSET +
+                                                sfu_in_active_offset);
+                        sfu_mem_w_base      <= pp_gemm_p_ready
+                                             ? (gpl_o_base + dma_gemm_p_active_offset)
+                                             : (`OSRAM_BASE + PP_SFU_OUT_BASE_OFFSET +
+                                                sfu_out_fill_offset);
                         sfu_mem_relu_active <= 1'b1;
                     end
                 end
@@ -1227,7 +1286,7 @@ module npu_top #(
                 SFU_MEM_WRITE: begin
                     sfu_mem_relu_active <= 1'b1;
                     if (xbar_m2_grant) begin
-                        if (sfu_mem_cnt == 7'd127) begin
+                        if (sfu_mem_cnt == sfu_mem_last) begin
                             sfu_mem_relu_active <= 1'b0;
                             sfu_mem_relu_done   <= 1'b1;
                         end else begin
@@ -1248,7 +1307,7 @@ module npu_top #(
             SFU_MEM_IDLE:  if (sfu_mem_relu_start) sfu_mem_next = SFU_MEM_READ;
             SFU_MEM_READ:  if (xbar_m2_grant)      sfu_mem_next = SFU_MEM_WRITE;
             SFU_MEM_WRITE: if (xbar_m2_grant) begin
-                               if (sfu_mem_cnt == 7'd127)
+                               if (sfu_mem_cnt == sfu_mem_last)
                                    sfu_mem_next = SFU_MEM_IDLE;
                                else
                                    sfu_mem_next = SFU_MEM_READ;
@@ -1259,8 +1318,19 @@ module npu_top #(
 
     assign sfu_mem_req   = (sfu_mem_state == SFU_MEM_READ) ||
                            (sfu_mem_state == SFU_MEM_WRITE);
-    assign sfu_mem_addr  = sfu_mem_base + {sfu_mem_cnt, 2'b00};
-    assign sfu_mem_wdata = {relu16(xbar_m2_rdata[31:16]), relu16(xbar_m2_rdata[15:0])};
+    assign sfu_mem_relu_finish = (sfu_mem_state == SFU_MEM_WRITE) &&
+                                 xbar_m2_grant &&
+                                 (sfu_mem_cnt == sfu_mem_last);
+    assign sfu_mem_addr  = (sfu_mem_state == SFU_MEM_WRITE)
+                          ? (sfu_mem_w_base + {sfu_mem_cnt, 2'b00})
+                          : (sfu_mem_r_base + {sfu_mem_cnt, 2'b00});
+    assign sfu_mem_wdata = sfu_mem_is_p
+                          ? {relu16(xbar_m2_rdata[31:16]),
+                             relu16(xbar_m2_rdata[15:0])}
+                          : {relu8(xbar_m2_rdata[31:24]),
+                             relu8(xbar_m2_rdata[23:16]),
+                             relu8(xbar_m2_rdata[15:8]),
+                             relu8(xbar_m2_rdata[7:0])};
     assign sfu_mem_wen   = (sfu_mem_state == SFU_MEM_WRITE);
 
     assign m2_req   = gemm_wb_active || sfu_mem_req;
@@ -1301,9 +1371,6 @@ module npu_top #(
         .ready        (pp_gemm_p_ready)
     );
 
-    logic pp_valu_fill, pp_valu_consume;
-    logic pp_valu_fill_bank, pp_valu_active_bank, pp_valu_ready;
-
     pingpong #(.BUF_SIZE(`PP_VALU_SIZE)) u_pp_valu (
         .clk,
         .rst_n        (dp_rst_n),
@@ -1314,17 +1381,24 @@ module npu_top #(
         .ready        (pp_valu_ready)
     );
 
-    logic pp_sfu_fill, pp_sfu_consume;
-    logic pp_sfu_fill_bank, pp_sfu_active_bank, pp_sfu_ready;
-
-    pingpong #(.BUF_SIZE(`PP_SFU_SIZE)) u_pp_sfu (
+    pingpong #(.BUF_SIZE(`PP_SFU_SIZE)) u_pp_sfu_in (
         .clk,
         .rst_n        (dp_rst_n),
-        .fill_done    (pp_sfu_fill),
-        .consume_done (pp_sfu_consume),
-        .fill_bank    (pp_sfu_fill_bank),
-        .active_bank  (pp_sfu_active_bank),
-        .ready        (pp_sfu_ready)
+        .fill_done    (pp_sfu_in_fill),
+        .consume_done (pp_sfu_in_consume),
+        .fill_bank    (pp_sfu_in_fill_bank),
+        .active_bank  (pp_sfu_in_active_bank),
+        .ready        (pp_sfu_in_ready)
+    );
+
+    pingpong #(.BUF_SIZE(`PP_SFU_SIZE)) u_pp_sfu_out (
+        .clk,
+        .rst_n        (dp_rst_n),
+        .fill_done    (pp_sfu_out_fill),
+        .consume_done (pp_sfu_out_consume),
+        .fill_bank    (pp_sfu_out_fill_bank),
+        .active_bank  (pp_sfu_out_active_bank),
+        .ready        (pp_sfu_out_ready)
     );
 
     wire dma_bridge_copy_done = (dma_br_state == DMA_BR_COPY) &&
@@ -1334,11 +1408,13 @@ module npu_top #(
     assign pp_gemm_b_fill    = dma_bridge_copy_done && dma_target_wsram;
     assign pp_gemm_b_consume = gemm_done;
     assign pp_gemm_p_fill    = gemm_wb_done;
-    assign pp_gemm_p_consume = prefill_done && dma_target_osram;
-    assign pp_valu_fill      = 1'b0;
-    assign pp_valu_consume   = valu_done;
-    assign pp_sfu_fill       = sfu_mem_relu_done;
-    assign pp_sfu_consume    = sfu_valid_out || sfu_mem_relu_done;
+    assign pp_gemm_p_consume = prefill_done && dma_target_gemm_p;
+    assign pp_valu_fill      = dma_bridge_copy_done && dma_target_valu;
+    assign pp_valu_consume   = valu_done || (prefill_done && dma_target_valu);
+    assign pp_sfu_in_fill    = dma_bridge_copy_done && dma_target_sfu_in;
+    assign pp_sfu_in_consume = sfu_mem_relu_finish && !sfu_mem_is_p;
+    assign pp_sfu_out_fill   = sfu_mem_relu_finish && !sfu_mem_is_p;
+    assign pp_sfu_out_consume= prefill_done && dma_target_sfu_out;
 
     // ================================================================
     // Global busy aggregation

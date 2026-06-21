@@ -77,6 +77,11 @@ OSRAM_BASE = 0x2000
 PP_GEMM_A_SIZE = 256
 PP_GEMM_B_SIZE = 256
 PP_GEMM_P_SIZE = 512
+PP_VALU_SIZE = 256
+PP_SFU_SIZE = 256
+PP_VALU_BASE = OSRAM_BASE + (PP_GEMM_P_SIZE * 2)
+PP_SFU_IN_BASE = PP_VALU_BASE + (PP_VALU_SIZE * 2)
+PP_SFU_OUT_BASE = PP_SFU_IN_BASE + (PP_SFU_SIZE * 2)
 
 
 def ctrl_start(opcode):
@@ -322,6 +327,15 @@ def dma_ext_write_i8_tile(dut, byte_addr, matrix):
     for r in range(16):
         for c in range(16):
             dma_ext_write_byte(dut, byte_addr + r * 16 + c, matrix[r][c])
+
+
+def dma_ext_write_bytes(dut, byte_addr, values):
+    for i, value in enumerate(values):
+        dma_ext_write_byte(dut, byte_addr + i, value)
+
+
+def dma_ext_read_bytes(dut, byte_addr, length):
+    return [dma_ext_read_byte(dut, byte_addr + i) for i in range(length)]
 
 
 def dma_ext_read_word(dut, byte_addr):
@@ -1107,6 +1121,156 @@ async def test_gemm_p_pingpong_writeback_and_dma_store_use_active_bank(dut):
     )
 
     dut._log.info("PASS: GEMM P ping-pong writeback and STORE use active bank")
+
+
+@cocotb.test()
+async def test_valu_pingpong_dma_window_roundtrip(dut):
+    """VALU ping-pong window: DMA LOAD fills banks, DMA STORE reads active banks."""
+    await setup_dut(dut)
+
+    dut.rst_n.value = 1
+    await RisingEdge(dut.clk)
+    await Timer(1, unit="ps")
+
+    await csr_write(dut, CSR_CTRL, CSR_CTRL_RESET)
+    for i in range(4):
+        await if_load(dut, i, (OP_WFI << 24))
+    await csr_write(dut, CSR_CTRL, 0)
+    await ClockCycles(dut.clk, 2)
+
+    in0_ext = 0x00008100
+    in1_ext = 0x00008300
+    out0_ext = 0x00008500
+    out1_ext = 0x00008700
+    tile0 = [((i + 3) & 0xFF) for i in range(256)]
+    tile1 = [((255 - i) & 0xFF) for i in range(256)]
+    dma_ext_write_bytes(dut, in0_ext, tile0)
+    dma_ext_write_bytes(dut, in1_ext, tile1)
+    await Timer(1, unit="ps")
+
+    load0_addrs = await start_dma_load_and_collect_copy_addrs(
+        dut, in0_ext, PP_VALU_BASE, 256, timeout_cycles=2200)
+    assert load0_addrs[0] == PP_VALU_BASE
+    assert load0_addrs[-1] == PP_VALU_BASE + 252
+    assert int(dut.pp_valu_ready.value) == 1
+    assert int(dut.pp_valu_active_bank.value) == 0
+    assert int(dut.pp_valu_fill_bank.value) == 1
+
+    load1_addrs = await start_dma_load_and_collect_copy_addrs(
+        dut, in1_ext, PP_VALU_BASE, 256, timeout_cycles=2200)
+    assert load1_addrs[0] == PP_VALU_BASE + PP_VALU_SIZE
+    assert load1_addrs[-1] == PP_VALU_BASE + PP_VALU_SIZE + 252
+    assert int(dut.pp_valu_active_bank.value) == 0
+
+    store0_addrs = await start_dma_store_and_collect_prefill_addrs(
+        dut, out0_ext, PP_VALU_BASE, 256, timeout_cycles=2200)
+    assert store0_addrs[0] == PP_VALU_BASE
+    assert store0_addrs[-1] == PP_VALU_BASE + 252
+    assert int(dut.pp_valu_active_bank.value) == 1
+
+    store1_addrs = await start_dma_store_and_collect_prefill_addrs(
+        dut, out1_ext, PP_VALU_BASE, 256, timeout_cycles=2200)
+    assert store1_addrs[0] == PP_VALU_BASE + PP_VALU_SIZE
+    assert store1_addrs[-1] == PP_VALU_BASE + PP_VALU_SIZE + 252
+
+    got0 = dma_ext_read_bytes(dut, out0_ext, 256)
+    got1 = dma_ext_read_bytes(dut, out1_ext, 256)
+    assert got0 == tile0, "VALU bank0 DMA roundtrip changed data"
+    assert got1 == tile1, "VALU bank1 DMA roundtrip changed data"
+    dut._log.info("PASS: VALU ping-pong DMA window roundtrip")
+
+
+@cocotb.test()
+async def test_sfu_pingpong_input_output_relu_tile_flow(dut):
+    """SFU input/output ping-pong: DMA LOAD -> ReLU tile -> DMA STORE."""
+    await setup_dut(dut)
+
+    dut.rst_n.value = 1
+    await RisingEdge(dut.clk)
+    await Timer(1, unit="ps")
+
+    await csr_write(dut, CSR_CTRL, CSR_CTRL_RESET)
+    for i in range(4):
+        await if_load(dut, i, (OP_WFI << 24))
+    await csr_write(dut, CSR_CTRL, 0)
+    await ClockCycles(dut.clk, 2)
+
+    in0_ext = 0x00007100
+    in1_ext = 0x00007300
+    out0_ext = 0x00007500
+    out1_ext = 0x00007700
+    tile0 = [((i * 3 + 0x78) & 0xFF) for i in range(256)]
+    tile1 = [((i * 5 + 0x40) & 0xFF) for i in range(256)]
+    exp0 = [0 if value & 0x80 else value for value in tile0]
+    exp1 = [0 if value & 0x80 else value for value in tile1]
+    dma_ext_write_bytes(dut, in0_ext, tile0)
+    dma_ext_write_bytes(dut, in1_ext, tile1)
+    await Timer(1, unit="ps")
+
+    in0_addrs = await start_dma_load_and_collect_copy_addrs(
+        dut, in0_ext, PP_SFU_IN_BASE, 256, timeout_cycles=2200)
+    assert in0_addrs[0] == PP_SFU_IN_BASE
+    assert in0_addrs[-1] == PP_SFU_IN_BASE + 252
+    assert int(dut.pp_sfu_in_ready.value) == 1
+    assert int(dut.pp_sfu_in_active_bank.value) == 0
+    assert int(dut.pp_sfu_in_fill_bank.value) == 1
+
+    in1_addrs = await start_dma_load_and_collect_copy_addrs(
+        dut, in1_ext, PP_SFU_IN_BASE, 256, timeout_cycles=2200)
+    assert in1_addrs[0] == PP_SFU_IN_BASE + PP_SFU_SIZE
+    assert in1_addrs[-1] == PP_SFU_IN_BASE + PP_SFU_SIZE + 252
+    assert int(dut.pp_sfu_in_active_bank.value) == 0
+
+    await csr_write(dut, CSR_CTRL, ctrl_start(OP_ACT_RELU))
+    await wait_sfu_idle_after_busy(dut, timeout_cycles=1400)
+    assert int(dut.pp_sfu_in_active_bank.value) == 1, (
+        f"SFU input active bank did not advance after tile0: "
+        f"in_ready={int(dut.pp_sfu_in_ready.value)} "
+        f"in_fill={int(dut.pp_sfu_in_fill_bank.value)} "
+        f"mem_is_p={int(dut.sfu_mem_is_p.value)} "
+        f"done={int(dut.sfu_mem_relu_done.value)}"
+    )
+    assert int(dut.pp_sfu_out_ready.value) == 1, (
+        f"SFU output bank not ready after tile0: "
+        f"out_active={int(dut.pp_sfu_out_active_bank.value)} "
+        f"out_fill={int(dut.pp_sfu_out_fill_bank.value)}"
+    )
+    assert int(dut.pp_sfu_out_active_bank.value) == 0
+    assert int(dut.pp_sfu_out_fill_bank.value) == 1
+
+    got0_word = osram_read_word(dut, PP_SFU_OUT_BASE)
+    exp0_word = exp0[0] | (exp0[1] << 8) | (exp0[2] << 16) | (exp0[3] << 24)
+    assert got0_word == exp0_word, (
+        f"SFU output bank0 word expected 0x{exp0_word:08X}, got 0x{got0_word:08X}"
+    )
+
+    await csr_write(dut, CSR_CTRL, ctrl_start(OP_ACT_RELU))
+    await wait_sfu_idle_after_busy(dut, timeout_cycles=1400)
+    assert int(dut.pp_sfu_out_active_bank.value) == 0
+    got1_word = osram_read_word(dut, PP_SFU_OUT_BASE + PP_SFU_SIZE)
+    exp1_word = exp1[0] | (exp1[1] << 8) | (exp1[2] << 16) | (exp1[3] << 24)
+    assert got1_word == exp1_word, (
+        f"SFU output bank1 word expected 0x{exp1_word:08X}, got 0x{got1_word:08X}"
+    )
+
+    out0_addrs = await start_dma_store_and_collect_prefill_addrs(
+        dut, out0_ext, PP_SFU_OUT_BASE, 256, timeout_cycles=2200)
+    assert out0_addrs[0] == PP_SFU_OUT_BASE
+    assert out0_addrs[-1] == PP_SFU_OUT_BASE + 252
+    assert int(dut.pp_sfu_out_active_bank.value) == 1
+
+    out1_addrs = await start_dma_store_and_collect_prefill_addrs(
+        dut, out1_ext, PP_SFU_OUT_BASE, 256, timeout_cycles=2200)
+    assert out1_addrs[0] == PP_SFU_OUT_BASE + PP_SFU_SIZE
+    assert out1_addrs[-1] == PP_SFU_OUT_BASE + PP_SFU_SIZE + 252
+
+    got0 = dma_ext_read_bytes(dut, out0_ext, 256)
+    got1 = dma_ext_read_bytes(dut, out1_ext, 256)
+    mismatches0 = [(i, got0[i], exp0[i]) for i in range(256) if got0[i] != exp0[i]]
+    mismatches1 = [(i, got1[i], exp1[i]) for i in range(256) if got1[i] != exp1[i]]
+    assert not mismatches0, f"SFU tile0 STORE mismatches: {mismatches0[:8]}"
+    assert not mismatches1, f"SFU tile1 STORE mismatches: {mismatches1[:8]}"
+    dut._log.info("PASS: SFU ping-pong input/output ReLU tile flow")
 
 
 @cocotb.test()
