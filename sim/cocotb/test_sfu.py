@@ -14,7 +14,7 @@ Pipeline latency (sfu_top): 4 cycles from valid_in to valid_out
 
 import cocotb
 from cocotb.clock import Clock
-from cocotb.triggers import ClockCycles, RisingEdge
+from cocotb.triggers import ClockCycles, RisingEdge, Timer
 import math
 import random
 
@@ -45,6 +45,25 @@ def to_signed(v, bits=8):
     if v >= (1 << (bits - 1)):
         return v - (1 << bits)
     return v
+
+
+def _round_shift_product(product, shift):
+    if shift == 0:
+        return product
+    bias = 1 << (shift - 1)
+    if product >= 0:
+        return (product + bias) >> shift
+    return (product + bias - 1) >> shift
+
+
+def golden_qd(opcode, x, zp, scale_mul, scale_shr):
+    if opcode == OP_DEQUANT:
+        raw = (x - zp) * scale_mul
+        y = raw >> scale_shr
+    else:
+        raw = x * scale_mul
+        y = _round_shift_product(raw, scale_shr) + zp
+    return max(-128, min(127, y))
 
 # ── Activation functions ───────────────────────────────────────────────
 
@@ -286,3 +305,54 @@ async def test_sfu_quant_dequant(dut):
             f"exp={expected} got={actual} (diff={diff})")
 
     dut._log.info("  quant/dequant: all vectors PASS")
+
+
+@cocotb.test()
+async def test_sfu_quant_dequant_pipelined_controls(dut):
+    """Back-to-back Q/DQ ops keep mode/zp/shift aligned with each product."""
+    clock = Clock(dut.clk, 2, unit="ns")
+    cocotb.start_soon(clock.start())
+    dut.valid_in.value = 0
+    await reset_dut(dut)
+
+    vectors = [
+        (OP_QUANT,    31,  7,  3, 1),
+        (OP_DEQUANT, -40,  5,  2, 0),
+        (OP_QUANT,   -17, 11,  5, 2),
+        (OP_DEQUANT, 100, 30,  3, 1),
+        (OP_QUANT,   64,  0, -2, 1),
+    ]
+    expected_fifo = []
+
+    for opcode, x, zp, sm, ss in vectors:
+        if int(dut.valid_out.value) and expected_fifo:
+            expected = expected_fifo.pop(0)
+            actual = dut.y_out.value.to_signed()
+            assert actual == expected, (
+                f"pipelined Q/DQ expected {expected}, got {actual}"
+            )
+
+        dut.opcode.value = opcode
+        dut.x_in.value = x & 0xFF
+        dut.zp.value = zp & 0xFF
+        dut.scale_mul.value = sm & 0xFFFF
+        dut.scale_shr.value = ss
+        dut.valid_in.value = 1
+        await RisingEdge(dut.clk)
+        await Timer(1, unit="ps")
+        expected_fifo.append(golden_qd(opcode, x, zp, sm, ss))
+
+    dut.valid_in.value = 0
+    for _ in range(SFU_LATENCY + 4):
+        if int(dut.valid_out.value) and expected_fifo:
+            expected = expected_fifo.pop(0)
+            actual = dut.y_out.value.to_signed()
+            assert actual == expected, (
+                f"pipelined Q/DQ expected {expected}, got {actual}"
+            )
+        await RisingEdge(dut.clk)
+        await Timer(1, unit="ps")
+
+    assert not expected_fifo, f"missing pipelined Q/DQ outputs: {expected_fifo}"
+
+    dut._log.info("  quant/dequant pipelined controls PASS")

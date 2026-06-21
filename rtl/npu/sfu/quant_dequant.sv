@@ -1,5 +1,5 @@
 // ============================================================
-// quant_dequant — INT8 quantise / dequantise with 2-cycle pipeline
+// quant_dequant — INT8 quantise / dequantise with aligned 3-stage pipeline
 //
 // Modes:
 //   0 (dequant)  y = (x - zp) * scale_mul >> scale_shr
@@ -10,6 +10,7 @@
 //   Cycle 0 — input sampling
 //   Cycle 1 — multiply
 //   Cycle 2 — shift + round (+ clip for quant)
+//   Cycle 3 — valid alignment for registered consumers
 // ============================================================
 
 module quant_dequant (
@@ -74,12 +75,21 @@ module quant_dequant (
     end
 
     logic signed [31:0] product;
+    logic               product_mode;
+    logic [7:0]         product_zp;
+    logic [7:0]         product_scale_shr;
 
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            product <= 32'd0;
+            product           <= 32'd0;
+            product_mode      <= 1'b0;
+            product_zp        <= 8'd0;
+            product_scale_shr <= 8'd0;
         end else if (valid_r) begin
-            product <= next_product;
+            product           <= next_product;
+            product_mode      <= mode_r;
+            product_zp        <= zp_r;
+            product_scale_shr <= scale_shr_r;
         end
     end
 
@@ -92,37 +102,37 @@ module quant_dequant (
     logic signed [31:0] q_with_zp;   // result after adding zero-point
 
     always_comb begin
-        if (mode_r == 1'b0) begin
+        if (product_mode == 1'b0) begin
             // Dequant:  y = product >> scale_shr  (no zp added per spec)
-            q_shifted = product >>> scale_shr_r;
+            q_shifted = product >>> product_scale_shr;
             q_with_zp = q_shifted;
         end else begin
             // Quant: round-to-nearest then shift
-            if (scale_shr_r > 8'd0) begin
+            if (product_scale_shr > 8'd0) begin
                 if ($signed(product) >= 0)
-                    q_shifted = (product + (32'd1 << (scale_shr_r - 8'd1))) >>> scale_shr_r;
+                    q_shifted = (product + (32'sd1 << (product_scale_shr - 8'd1))) >>> product_scale_shr;
                 else
-                    q_shifted = (product + (32'd1 << (scale_shr_r - 8'd1)) - 32'd1) >>> scale_shr_r;
+                    q_shifted = (product + (32'sd1 << (product_scale_shr - 8'd1)) - 32'sd1) >>> product_scale_shr;
             end else begin
                 q_shifted = product;
             end
             // Add zero point for quant mode
-            q_with_zp = q_shifted + $signed({24'd0, zp_r});
+            q_with_zp = q_shifted + $signed({24'd0, product_zp});
         end
     end
 
     logic [7:0]  y_r;
     logic        valid_r2;
+    logic        valid_r3;
 
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             y_r      <= 8'd0;
             valid_r2 <= 1'b0;
+            valid_r3 <= 1'b0;
         end else begin
-            // Use valid_r2 (one-cycle-delayed valid_r) so that
-            // y_r latches the product from stage 1 rather than the
-            // stale value from the previous cycle.
             valid_r2 <= valid_r;
+            valid_r3 <= valid_r2;
             if (valid_r2) begin
                 // Saturate to INT8 [-128, 127]
                 if ($signed(q_with_zp) > 127)
@@ -139,6 +149,6 @@ module quant_dequant (
     // Output
     // ------------------------------------------------------------------
     assign y_out    = y_r;
-    assign valid_out = valid_r2;
+    assign valid_out = valid_r3;
 
 endmodule
