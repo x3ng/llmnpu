@@ -23,6 +23,9 @@ static inline void csr_wr(const npu_dev_t *d, uint32_t off, uint32_t val)
 // ------------------------------------------------------------------
 static uint32_t _dsram_next = DSRAM_BASE;
 
+#define DESC_BOUNCE_SIZE 256u
+static uint8_t _desc_bounce[DESC_BOUNCE_SIZE] __attribute__((aligned(8)));
+
 // ------------------------------------------------------------------
 // DMA transfer timeout (busy-loop iterations)
 // ------------------------------------------------------------------
@@ -112,18 +115,28 @@ void npu_init(npu_dev_t *d, uintptr_t mmio_base)
 int npu_load_descriptor(npu_dev_t *d, const void *desc, size_t n)
 {
     if (n == 0) return -1;
+    if (n > DESC_BOUNCE_SIZE) return -1;
 
-    // Word-align the allocation size
+    // The DMA datapath moves 64-bit beats.  Descriptor callers commonly
+    // pass packed structs from the stack, so bounce through an aligned,
+    // zero-padded buffer to preserve byte layout.
     uint32_t size = (uint32_t)n;
-    uint32_t aligned = (size + 3u) & ~3u;
+    uint32_t aligned = (size + 7u) & ~7u;
 
     // Check DSRAM space
     if (_dsram_next + aligned > DSRAM_BASE + DSRAM_SIZE) return -1;
 
     uint32_t offset = _dsram_next;
 
+    for (uint32_t i = 0; i < aligned; i++) {
+        _desc_bounce[i] = 0;
+    }
+    for (uint32_t i = 0; i < size; i++) {
+        _desc_bounce[i] = ((const uint8_t *)desc)[i];
+    }
+
     // DMA the descriptor from host memory into DSRAM
-    int ret = _dma_xfer(d, (uint32_t)(uintptr_t)desc, offset, size, 0);
+    int ret = _dma_xfer(d, (uint32_t)(uintptr_t)_desc_bounce, offset, aligned, 0);
     if (ret != 0) return -1;
 
     _dsram_next += aligned;

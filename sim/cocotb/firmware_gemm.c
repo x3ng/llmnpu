@@ -264,11 +264,17 @@ void main(void)
               // --------------------------------------------------
               {
                   int fail = 0;
-                  uint32_t desc[2];
-                  desc[0] = 0;
-                  desc[1] = 0;
+                  gemm_desc_t desc;
+                  memset(&desc, 0, sizeof(desc));
+                  desc.M = 1;             // one 16-row tile
+                  desc.N = 1;             // one 16-col tile
+                  desc.K = 1;             // one 16-deep tile
+                  desc.a_sram_bank = 0;   // ASRAM
+                  desc.b_sram_bank = 1;   // WSRAM
+                  desc.o_sram_bank = 2;   // OSRAM
+                  desc.out_scale_mul = 1;
                   // Load descriptor into DSRAM via driver DMA path.
-                  int dp = npu_load_descriptor(&npu, desc, sizeof(desc));
+                  int dp = npu_load_descriptor(&npu, &desc, sizeof(desc));
                   if (dp < 0) { fail = 1; }
                   else if (npu_issue(&npu, 0x01 /* OP_GEMM */, (uint32_t)dp) != 0) {
                       fail = 1;

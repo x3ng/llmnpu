@@ -808,6 +808,8 @@ async def test_e2e_gemm_pass(dut):
                       read_mem_words(dut.u_npu.u_crossbar.u_wsram.mem, 8, 32))
             log_words("OSRAM words[0:8]",
                       read_mem_words(dut.u_npu.u_crossbar.u_osram.mem, 8))
+            log_words("DSRAM words[0:8]",
+                      read_mem_words(dut.u_npu.u_crossbar.u_dsram.mem, 8))
             osram_words = read_mem_words(dut.u_npu.u_crossbar.u_osram.mem, 128)
             if all(isinstance(v, int) for v in osram_words):
                 import struct
@@ -837,6 +839,13 @@ async def test_e2e_gemm_pass(dut):
                 "[MEMDIAG] gemm_issue_cmd_latched=0x%08X gemm_k_count=%d",
                 int(dut.u_npu.gemm_issue_cmd_latched.value) & 0xFFFFFFFF,
                 int(dut.u_npu.gemm_k_count.value) & 0xFF,
+            )
+            dut._log.info(
+                "[MEMDIAG] gpl bases a=0x%04X b=0x%04X o=0x%04X desc_valid=%d",
+                int(dut.u_npu.gpl_a_base.value) & 0xFFFF,
+                int(dut.u_npu.gpl_b_base.value) & 0xFFFF,
+                int(dut.u_npu.gpl_o_base.value) & 0xFFFF,
+                int(dut.u_npu.gpl_desc_valid.value) & 1,
             )
             gpl_a0 = int(dut.u_npu.gpl_a_row[0].value)
             gpl_b0 = int(dut.u_npu.gpl_b_row[0].value)
