@@ -29,7 +29,7 @@ LOG_FILTER ?= PASS|FAIL|ERROR|UART|timeout|Timeout|wfi|WFI|trap|TRAP|mismatch|MI
 
 include $(shell cocotb-config --makefiles)/Makefile.sim
 
-.PHONY: test_pe test_gemm test_valu test_sfu test_dma test_dma_load test_memory test_if_id test_npu_top
+.PHONY: test_pe test_gemm test_valu test_sfu test_dma test_dma_load test_memory test_if_id test_pingpong test_npu_top
 .PHONY: test_e2e test_e2e_csr test_e2e_boot test_e2e_gemm test_e2e_dma test_e2e_program
 .PHONY: rebuild_e2e_gemm e2e_gemm_log e2e_dma_log e2e_boot_log e2e_csr_log e2e_program_log e2e_log test_quick test_all clean
 
@@ -127,6 +127,14 @@ test_if_id:
 	PYTHONPATH=$(SIM_DIR)/cocotb:$$PYTHONPATH \
 	MODULE=test_if_id TOPLEVEL=if_id_top \
 	VERILOG_SOURCES="$(REPO_ROOT)/rtl/npu/if_id/ifetch.sv $(REPO_ROOT)/rtl/npu/if_id/idecode.sv $(REPO_ROOT)/rtl/npu/if_id/dispatch.sv $(REPO_ROOT)/rtl/npu/if_id/if_id_top.sv" \
+	$(MAKE)
+
+test_pingpong: SIM_BUILD = sim_build_pingpong
+test_pingpong:
+	@rm -rf $(SIM_BUILD)
+	PYTHONPATH=$(SIM_DIR)/cocotb:$$PYTHONPATH \
+	MODULE=test_pingpong TOPLEVEL=pingpong \
+	VERILOG_SOURCES="$(REPO_ROOT)/rtl/npu/pingpong.sv" \
 	$(MAKE)
 
 test_npu_top: SIM_BUILD = sim_build_npu_top
