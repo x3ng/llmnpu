@@ -24,6 +24,8 @@
 #define OP_GEMM         0x01u       // from isa_defines.svh
 #define OP_ACT_RELU     0x20u
 #define OP_ACT_GELU     0x21u
+#define OP_ACT_RELU6    0x24u
+#define OP_ACT_CLIP     0x25u
 
 #define GEMM_TIMEOUT_US 1000000u    // 1 second
 

@@ -143,7 +143,7 @@ async def test_itype_decode(dut):
 
 @cocotb.test()
 async def test_dispatch_routing(dut):
-    """Test 3: Dispatch GEMM->VADD->RELU sequence to correct units.
+    """Test 3: Dispatch GEMM->VADD->SFU sequence to correct units.
 
     Verifies each instruction routes to its target unit exclusively.
     """
@@ -153,6 +153,8 @@ async def test_dispatch_routing(dut):
         0x01020304,  # GEMM      (opcode 0x01)
         0x10000000,  # VADD      (opcode 0x10)
         0x20000000,  # ACT_RELU  (opcode 0x20)
+        0x24000000,  # ACT_RELU6 (opcode 0x24)
+        0x25000000,  # ACT_CLIP  (opcode 0x25)
     ])
 
     dut.rst_n.value = 1
@@ -196,8 +198,28 @@ async def test_dispatch_routing(dut):
         "Test 3 cycle 3: valu_cmd_valid should be 0"
     assert not int(dut.dma_cmd_valid.value), \
         "Test 3 cycle 3: dma_cmd_valid should be 0"
+    assert not int(dut.illegal_cmd_valid.value), \
+        "Test 3 cycle 3: ACT_RELU should not be illegal"
 
-    dut._log.info("PASS: Test 3 GEMM->VADD->RELU routed to correct units")
+    # Posedge E: dispatch RELU6 -> sfu_cmd_valid=1
+    await RisingEdge(dut.clk)
+    await ReadOnly()
+    assert int(dut.sfu_cmd_valid.value), \
+        "Test 3 cycle 4: sfu_cmd_valid not asserted for ACT_RELU6"
+    assert int(dut.sfu_cmd.value) == 0x24000000
+    assert not int(dut.illegal_cmd_valid.value), \
+        "Test 3 cycle 4: ACT_RELU6 should not be illegal"
+
+    # Posedge F: dispatch CLIP -> sfu_cmd_valid=1
+    await RisingEdge(dut.clk)
+    await ReadOnly()
+    assert int(dut.sfu_cmd_valid.value), \
+        "Test 3 cycle 5: sfu_cmd_valid not asserted for ACT_CLIP"
+    assert int(dut.sfu_cmd.value) == 0x25000000
+    assert not int(dut.illegal_cmd_valid.value), \
+        "Test 3 cycle 5: ACT_CLIP should not be illegal"
+
+    dut._log.info("PASS: Test 3 GEMM->VADD->SFU routed to correct units")
 
 
 @cocotb.test()

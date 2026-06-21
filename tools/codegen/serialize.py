@@ -42,6 +42,8 @@ class Opcode(IntEnum):
     ACT_GELU    = 0x21
     ACT_SIGMOID = 0x22
     ACT_TANH    = 0x23
+    ACT_RELU6   = 0x24
+    ACT_CLIP    = 0x25
     QUANT       = 0x30
     DEQUANT     = 0x31
     DMA_LD      = 0x40

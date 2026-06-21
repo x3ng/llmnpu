@@ -71,7 +71,7 @@ module dispatch (
 
     assign target_gemm = (opcode == 8'h01) || (opcode == 8'h02);
     assign target_valu = (opcode == 8'h10) || (opcode == 8'h11);
-    assign target_sfu  = (opcode >= 8'h20 && opcode <= 8'h23) ||
+    assign target_sfu  = (opcode >= 8'h20 && opcode <= 8'h25) ||
                          (opcode >= 8'h30 && opcode <= 8'h31);
     assign target_dma  = (opcode >= 8'h40 && opcode <= 8'h42);
     assign is_sync     = (opcode == 8'hF0);

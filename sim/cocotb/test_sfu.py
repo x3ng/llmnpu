@@ -24,6 +24,8 @@ OP_ACT_GELU    = 0x21
 OP_ACT_RELU    = 0x20
 OP_ACT_SIGMOID = 0x22
 OP_ACT_TANH    = 0x23
+OP_ACT_RELU6   = 0x24
+OP_ACT_CLIP    = 0x25
 OP_QUANT       = 0x30
 OP_DEQUANT     = 0x31
 OP_NOP         = 0xFF
@@ -206,6 +208,58 @@ async def test_sfu_relu(dut):
         )
 
     dut._log.info("  ReLU: all vectors PASS")
+
+
+@cocotb.test()
+async def test_sfu_relu6_clip(dut):
+    """SFU ReLU6/Clip clamp signed INT8 inputs to non-negative ranges."""
+    clock = Clock(dut.clk, 2, unit="ns")
+    cocotb.start_soon(clock.start())
+    dut.opcode.value = 0
+    dut.x_in.value = 0
+    dut.zp.value = 0
+    dut.scale_mul.value = 0
+    dut.scale_shr.value = 0
+    dut.valid_in.value = 0
+    await reset_dut(dut)
+
+    vectors = [
+        (OP_ACT_RELU6, 0, -8, 0),
+        (OP_ACT_RELU6, 0, 0, 0),
+        (OP_ACT_RELU6, 0, 5, 5),
+        (OP_ACT_RELU6, 0, 6, 6),
+        (OP_ACT_RELU6, 0, 7, 6),
+        (OP_ACT_RELU6, 0, 127, 6),
+        (OP_ACT_CLIP, 10, -3, 0),
+        (OP_ACT_CLIP, 10, 0, 0),
+        (OP_ACT_CLIP, 10, 7, 7),
+        (OP_ACT_CLIP, 10, 10, 10),
+        (OP_ACT_CLIP, 10, 42, 10),
+    ]
+
+    for opcode, clip_max, x, expected in vectors:
+        dut.opcode.value = opcode
+        dut.zp.value = clip_max
+        dut.x_in.value = x & 0xFF
+        dut.valid_in.value = 1
+        await RisingEdge(dut.clk)
+        dut.valid_in.value = 0
+
+        valid_seen = False
+        for _ in range(SFU_LATENCY + 2):
+            await RisingEdge(dut.clk)
+            if int(dut.valid_out.value):
+                valid_seen = True
+                break
+
+        assert valid_seen, f"opcode=0x{opcode:02X} x={x}: valid_out did not assert"
+        actual = dut.y_out.value.to_signed()
+        assert actual == expected, (
+            f"opcode=0x{opcode:02X} x={x} clip={clip_max}: "
+            f"expected {expected}, got {actual}"
+        )
+
+    dut._log.info("  ReLU6/Clip: all vectors PASS")
 
 
 @cocotb.test()

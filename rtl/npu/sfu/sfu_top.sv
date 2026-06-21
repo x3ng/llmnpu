@@ -9,6 +9,8 @@
 //   OP_ACT_GELU    (0x21)  →  LUT engine, func_sel=0
 //   OP_ACT_SIGMOID (0x22)  →  LUT engine, func_sel=1
 //   OP_ACT_TANH    (0x23)  →  LUT engine, func_sel=2
+//   OP_ACT_RELU6   (0x24)  →  integer clamp to [0, 6]
+//   OP_ACT_CLIP    (0x25)  →  integer clamp to [0, zp]
 //   OP_QUANT       (0x30)  →  quant_dequant, mode=1
 //   OP_DEQUANT     (0x31)  →  quant_dequant, mode=0
 //
@@ -43,7 +45,9 @@ module sfu_top (
     logic        relu_valid_in;
     logic        qd_valid_in;
 
-    assign relu_valid_in = valid_in && (opcode == `OP_ACT_RELU);
+    assign relu_valid_in = valid_in && ((opcode == `OP_ACT_RELU) ||
+                                        (opcode == `OP_ACT_RELU6) ||
+                                        (opcode == `OP_ACT_CLIP));
     assign lut_valid_in  = valid_in && ((opcode == `OP_ACT_GELU) ||
                                         (opcode == `OP_ACT_SIGMOID) ||
                                         (opcode == `OP_ACT_TANH));
@@ -74,19 +78,33 @@ module sfu_top (
     );
 
     // ------------------------------------------------------------------
-    // ReLU path  (integer clamp, aligned to LUT path)
+    // ReLU/Clip path  (integer clamp, aligned to LUT path)
     // ------------------------------------------------------------------
     logic [7:0] relu_y;
     logic       relu_valid;
     logic [7:0] relu_y_aligned;
     logic       relu_valid_aligned;
+    logic [7:0] relu_clip_max;
+
+    always_comb begin
+        unique case (opcode)
+            `OP_ACT_RELU6: relu_clip_max = 8'd6;
+            `OP_ACT_CLIP:  relu_clip_max = zp;
+            default:       relu_clip_max = 8'h7F;
+        endcase
+    end
 
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             relu_y     <= 8'd0;
             relu_valid <= 1'b0;
         end else begin
-            relu_y     <= x_in[7] ? 8'd0 : x_in;
+            if (x_in[7])
+                relu_y <= 8'd0;
+            else if (x_in > relu_clip_max)
+                relu_y <= relu_clip_max;
+            else
+                relu_y <= x_in;
             relu_valid <= relu_valid_in;
         end
     end

@@ -56,7 +56,7 @@ module if_id_top (
     wire [7:0]  opcode   = id_instr[31:24];
     wire target_gemm = (opcode == 8'h01) || (opcode == 8'h02);
     wire target_valu = (opcode == 8'h10) || (opcode == 8'h11);
-    wire target_sfu  = (opcode >= 8'h20 && opcode <= 8'h23) ||
+    wire target_sfu  = (opcode >= 8'h20 && opcode <= 8'h25) ||
                        (opcode >= 8'h30 && opcode <= 8'h31);
     wire target_dma  = (opcode >= 8'h40 && opcode <= 8'h42);
     wire is_sync     = (opcode == 8'hF0);

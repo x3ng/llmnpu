@@ -18,6 +18,8 @@
 `define OP_ACT_GELU    8'h21
 `define OP_ACT_SIGMOID 8'h22
 `define OP_ACT_TANH    8'h23
+`define OP_ACT_RELU6   8'h24
+`define OP_ACT_CLIP    8'h25
 `define OP_QUANT       8'h30
 `define OP_DEQUANT     8'h31
 `define OP_DMA_LD      8'h40
