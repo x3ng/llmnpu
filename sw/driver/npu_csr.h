@@ -6,6 +6,8 @@
 #ifndef NPU_CSR_H
 #define NPU_CSR_H
 
+#include <stdint.h>
+
 // --- NPU MMIO base address ---
 #define NPU_CSR_BASE  0x10000000u
 
@@ -26,22 +28,25 @@
 #define CSR_CTRL_START    (1u << 0)
 #define CSR_CTRL_RESET    (1u << 1)
 #define CSR_CTRL_HALT     (1u << 2)
+#define CSR_CTRL_OPCODE_SHIFT 8
+#define CSR_CTRL_OPCODE_MASK  (0xFFu << CSR_CTRL_OPCODE_SHIFT)
+#define CSR_CTRL_OPCODE(op)   (((uint32_t)(op) & 0xFFu) << CSR_CTRL_OPCODE_SHIFT)
 
 // --- CSR_STATUS bits ---
 #define CSR_STATUS_BUSY       (1u << 0)
 #define CSR_STATUS_IRQ_PEND   (1u << 1)
 
-// --- DMA CSR3 (control / status) bits ---
+// --- DMA CSR3 control bits ---
+// RTL stores CSR3 as a plain RW control register. Hardware completion is
+// reported through CSR_STATUS.BUSY/IRQ_STAT, not CSR3 status bits.
 #define DMA_CSR3_START    (1u << 0)
 #define DMA_CSR3_DIR_ST   (1u << 1)   // 0=load (ext→SRAM), 1=store (SRAM→ext)
-#define DMA_CSR3_BUSY     (1u << 2)
-#define DMA_CSR3_FAULT    (1u << 3)
 
 // --- DMA CSR register roles ---
 // CSR0 : external AXI address
 // CSR1 : SRAM byte offset
 // CSR2 : transfer length (bytes)
-// CSR3 : control / status
+// CSR3 : control
 
 // --- IRQ bits (IRQ_EN and IRQ_STAT share layout) ---
 #define IRQ_DONE          (1u << 0)

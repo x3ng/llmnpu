@@ -27,18 +27,38 @@ static uint32_t _dsram_next = DSRAM_BASE;
 // DMA transfer timeout (busy-loop iterations)
 // ------------------------------------------------------------------
 #define DMA_TIMEOUT_LOOPS  100000u
+#define DMA_START_TIMEOUT_LOOPS  10000u
+
+static int _wait_not_busy(npu_dev_t *d, uint32_t loops)
+{
+    while (csr_rd(d, CSR_STATUS) & CSR_STATUS_BUSY) {
+        if (--loops == 0) return -1;
+    }
+    return 0;
+}
+
+static int _wait_started_or_done(npu_dev_t *d, uint32_t loops)
+{
+    while (1) {
+        uint32_t status = csr_rd(d, CSR_STATUS);
+        if (status & (CSR_STATUS_BUSY | CSR_STATUS_IRQ_PEND)) return 0;
+        if (--loops == 0) return -1;
+    }
+}
 
 static int _dma_xfer(npu_dev_t *d,
                      uint32_t ext_addr, uint32_t sram_off, uint32_t len,
                      int is_st)
 {
-    volatile uint32_t to;
+    if (len == 0) return -1;
 
-    // Wait for any previous DMA to finish
-    to = DMA_TIMEOUT_LOOPS;
-    while (csr_rd(d, CSR_DMA_CSR3) & DMA_CSR3_BUSY) {
-        if (--to == 0) return -1;
-    }
+    // Wait for any previous NPU/DMA/bridge work to finish.
+    if (_wait_not_busy(d, DMA_TIMEOUT_LOOPS) != 0) return -1;
+
+    // Clear stale completion before issuing this DMA.  Otherwise the
+    // start-detection poll can observe the previous transfer's IRQ and
+    // return before the new DMA/bridge has asserted BUSY.
+    csr_wr(d, CSR_IRQ_STAT, IRQ_DONE);
 
     // Program the four DMA CSRs
     csr_wr(d, CSR_DMA_CSR0, ext_addr);
@@ -49,16 +69,11 @@ static int _dma_xfer(npu_dev_t *d,
     if (is_st) ctrl |= DMA_CSR3_DIR_ST;
     csr_wr(d, CSR_DMA_CSR3, ctrl);
 
-    // Wait for transfer completion
-    to = DMA_TIMEOUT_LOOPS;
-    while (csr_rd(d, CSR_DMA_CSR3) & DMA_CSR3_BUSY) {
-        if (--to == 0) return -1;
-    }
-
-    // Check for DMA fault
-    if (csr_rd(d, CSR_DMA_CSR3) & DMA_CSR3_FAULT) return -1;
-
-    return 0;
+    // CSR3 is not hardware status. STATUS.BUSY is the RTL aggregate of
+    // DMA engine busy plus the DMA<->SRAM bridge FSM, so it is the only
+    // completion source that prevents back-to-back DMA hazards.
+    if (_wait_started_or_done(d, DMA_START_TIMEOUT_LOOPS) != 0) return -1;
+    return _wait_not_busy(d, DMA_TIMEOUT_LOOPS);
 }
 
 // ------------------------------------------------------------------
@@ -132,10 +147,11 @@ int npu_issue(npu_dev_t *d, uint8_t opcode, uint32_t desc_ptr)
     // Refuse if the NPU is already executing
     if (csr_rd(d, CSR_STATUS) & CSR_STATUS_BUSY) return -1;
 
-    (void)opcode;  // reserved for future opcode-based dispatch
-
+    // Clear stale done before issuing so npu_wait_done can use IRQ_PEND
+    // as a completion edge if the operation finishes before BUSY is sampled.
+    csr_wr(d, CSR_IRQ_STAT, IRQ_DONE);
     csr_wr(d, CSR_DESC_PTR, desc_ptr);
-    csr_wr(d, CSR_CTRL, CSR_CTRL_START);
+    csr_wr(d, CSR_CTRL, CSR_CTRL_START | CSR_CTRL_OPCODE(opcode));
     return 0;
 }
 
@@ -143,6 +159,8 @@ int npu_wait_done(npu_dev_t *d, uint32_t timeout_us)
 {
     uint32_t elapsed = 0u;
     const uint32_t step_us = 100u;  // poll every ~100 µs
+
+    if (_wait_started_or_done(d, DMA_START_TIMEOUT_LOOPS) != 0) return -1;
 
     while (elapsed < timeout_us) {
         if (!(csr_rd(d, CSR_STATUS) & CSR_STATUS_BUSY)) return 0;
