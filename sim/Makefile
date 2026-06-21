@@ -213,8 +213,8 @@ test_e2e_dma:
 # ── E2E Stage 4: GEMM (Verilator) ──
 
 test_e2e_contract: SIM_BUILD = sim_build_e2e_contract
+test_e2e_contract: SIM = verilator
 test_e2e_contract:
-	@rm -rf $(SIM_BUILD)
 	$(call build_fw,firmware_contract, \
 		$(SIM_DIR)/cocotb/firmware_contract.c \
 		$(REPO_ROOT)/sw/driver/npu_driver.c, \
@@ -222,7 +222,11 @@ test_e2e_contract:
 	PYTHONPATH=$(SIM_DIR)/cocotb:$$PYTHONPATH \
 	MODULE=test_e2e_contract TOPLEVEL=top_soc \
 	VERILOG_SOURCES="$(E2E_RTL)" \
-	$(MAKE) COMPILE_ARGS='$(E2E_COMPILE_ARGS)' \
+	$(MAKE) SIM=verilator \
+		VERILOG_INCLUDE_DIRS='$(E2E_VERILATOR_INCLUDE_DIRS)' \
+		EXTRA_ARGS='$(GEMM_EXTRA_ARGS) $(E2E_VERILATOR_EXTRA_ARGS)' \
+		BUILD_ARGS='$(GEMM_BUILD_ARGS)' \
+		CUSTOM_COMPILE_DEPS='$(SIM_DIR)/Makefile $(E2E_RTL)' \
 		2>&1 | tee $(SIM_BUILD)/test.log
 
 # ── E2E Stage 4: GEMM (Verilator) ──
