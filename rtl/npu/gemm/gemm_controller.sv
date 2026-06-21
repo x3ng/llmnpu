@@ -55,7 +55,7 @@ module gemm_controller (
     end
 
     // Combinational control outputs
-    assign load_b    = (state == LOAD_B);
+    assign load_b    = (state == LOAD_B) || (state == COMPUTE);
     assign clear_acc = (state == PREFETCH);
     assign done      = (state == WRITEBACK);
     assign busy      = (state != IDLE);

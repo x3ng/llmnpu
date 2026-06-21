@@ -552,20 +552,20 @@ module npu_top #(
     } gpl_state_t;
 
     gpl_state_t  gpl_state, gpl_next;
-    logic [3:0]  gpl_row;
-    logic [1:0]  gpl_word;
-    logic [127:0] gpl_b_row [0:15];
-    logic [127:0] gpl_a_row [0:15];
+    logic [7:0]  gpl_row;
+    logic [5:0]  gpl_word;
+    logic [127:0] gpl_b_row [0:255];
+    logic [2047:0] gpl_a_row [0:15];
 
-    logic [3:0]  gpl_feed_k;
-    logic [6:0]  gpl_feed_byte;
+    logic [7:0]  gpl_feed_k;
+    logic [10:0] gpl_feed_byte;
     logic [1:0]  gpl_feed_phase;
     logic [127:0] gpl_b_feed_row;
     logic [1:0]  gpl_b_word;
     logic        gpl_capture_valid;
     logic        gpl_capture_is_b;
-    logic [3:0]  gpl_capture_row;
-    logic [1:0]  gpl_capture_word;
+    logic [7:0]  gpl_capture_row;
+    logic [5:0]  gpl_capture_word;
     logic        gpl_desc_capture_valid;
     logic [2:0]  gpl_desc_capture_word;
     logic [15:0] gpl_desc_ptr_latched;
@@ -573,11 +573,26 @@ module npu_top #(
     logic [15:0] gpl_b_base;
     logic [15:0] gpl_o_base;
     logic [7:0]  gpl_k_count;
+    logic [4:0]  gpl_k_tiles;
     logic        gpl_desc_valid;
 
     assign gemm_k_count = gpl_k_count;
 
     logic [15:0] gpl_read_addr;
+    logic [8:0]  gpl_k_bytes;
+    logic [5:0]  gpl_a_word_last;
+    logic        gpl_feed_last_k;
+    logic        gpl_load_last_k;
+
+    always_comb begin
+        gpl_k_bytes = {gpl_k_tiles, 4'd0};
+        gpl_a_word_last = gpl_k_bytes[7:2] - 6'd1;
+        gpl_feed_last_k = (gpl_k_count == 8'd0) ? (gpl_feed_k == 8'hFF) :
+                                                   (gpl_feed_k == (gpl_k_count - 8'd1));
+        gpl_load_last_k = (gpl_k_count == 8'd0) ? (gpl_row == 8'hFF) :
+                                                  (gpl_row == (gpl_k_count - 8'd1));
+    end
+
     always_comb begin
         case (gpl_state)
             GPL_LOAD_B0: gpl_b_word = 2'd0;
@@ -593,12 +608,12 @@ module npu_top #(
         case (gpl_state)
             GPL_LOAD_B0, GPL_LOAD_B1, GPL_LOAD_B2, GPL_LOAD_B3:
                 gpl_read_addr = gpl_b_base
-                              + {gpl_row, 4'd0}
+                              + {4'd0, gpl_row, 4'd0}
                               + {10'd0, gpl_b_word, 2'd0};
             GPL_LOAD_A:
                 gpl_read_addr = gpl_a_base
-                              + {gpl_row, 4'd0}
-                              + {10'd0, gpl_word, 2'd0};
+                              + ({8'd0, gpl_row[3:0]} * {7'd0, gpl_k_bytes})
+                              + {8'd0, gpl_word, 2'd0};
             GPL_DESC0: gpl_read_addr = gpl_desc_ptr_latched;
             GPL_DESC1: gpl_read_addr = gpl_desc_ptr_latched + 16'd4;
             GPL_DESC2: gpl_read_addr = gpl_desc_ptr_latched + 16'd8;
@@ -618,16 +633,16 @@ module npu_top #(
     always_ff @(posedge clk or negedge dp_rst_n) begin
         if (!dp_rst_n) begin
             gpl_state     <= GPL_IDLE;
-            gpl_row       <= 4'd0;
-            gpl_word      <= 2'd0;
+            gpl_row       <= 8'd0;
+            gpl_word      <= 6'd0;
             gpl_gemm_start<= 1'b0;
-            gpl_feed_k    <= 4'd0;
+            gpl_feed_k    <= 8'd0;
             gpl_feed_phase<= 2'd0;
             gpl_feeding   <= 1'b0;
             gpl_capture_valid <= 1'b0;
             gpl_capture_is_b  <= 1'b0;
-            gpl_capture_row   <= 4'd0;
-            gpl_capture_word  <= 2'd0;
+            gpl_capture_row   <= 8'd0;
+            gpl_capture_word  <= 6'd0;
             gpl_desc_capture_valid <= 1'b0;
             gpl_desc_capture_word  <= 3'd0;
             gpl_desc_ptr_latched   <= `DSRAM_BASE;
@@ -635,11 +650,13 @@ module npu_top #(
             gpl_b_base             <= `WSRAM_BASE;
             gpl_o_base             <= `OSRAM_BASE;
             gpl_k_count            <= 8'd16;
+            gpl_k_tiles            <= 5'd1;
             gpl_desc_valid         <= 1'b0;
             for (int r = 0; r < 16; r++) begin
-                gpl_b_row[r] <= 128'd0;
                 gpl_a_row[r] <= 128'd0;
             end
+            for (int k = 0; k < 256; k++)
+                gpl_b_row[k] <= 128'd0;
         end else begin
             gpl_state <= gpl_next;
             gpl_gemm_start <= 1'b0;
@@ -659,8 +676,10 @@ module npu_top #(
                 unique case (gpl_desc_capture_word)
                     3'd1: begin
                         if (xbar_m1_rdata[15:0] != 16'd0) begin
-                            gpl_k_count <= (xbar_m1_rdata[15:4] != 12'd0) ? 8'hFF :
+                            gpl_k_count <= (xbar_m1_rdata[15:0] >= 16'd16) ? 8'd0 :
                                            {xbar_m1_rdata[3:0], 4'd0};
+                            gpl_k_tiles <= (xbar_m1_rdata[15:0] >= 16'd16) ? 5'd16 :
+                                           {1'b0, xbar_m1_rdata[3:0]};
                             gpl_a_base   <= {xbar_m1_rdata[19:16], 12'd0};
                             gpl_b_base   <= {xbar_m1_rdata[27:24], 12'd0};
                             gpl_desc_valid <= 1'b1;
@@ -678,10 +697,10 @@ module npu_top #(
 
             case (gpl_state)
                 GPL_IDLE: begin
-                    gpl_row   <= 4'd0;
-                    gpl_word  <= 2'd0;
+                    gpl_row   <= 8'd0;
+                    gpl_word  <= 6'd0;
                     gpl_feeding <= 1'b0;
-                    gpl_feed_k <= 4'd0;
+                    gpl_feed_k <= 8'd0;
                     gpl_feed_phase <= 2'd0;
                     if (gemm_issue_valid) begin
                         gpl_desc_ptr_latched <= csr_desc_ptr[15:0];
@@ -690,6 +709,7 @@ module npu_top #(
                         gpl_o_base           <= `OSRAM_BASE;
                         gpl_k_count          <= (gemm_issue_cmd[7:0] == 8'd0) ? 8'd16 :
                                                 gemm_issue_cmd[7:0];
+                        gpl_k_tiles          <= 5'd1;
                         gpl_desc_valid       <= 1'b0;
                     end
                 end
@@ -710,12 +730,12 @@ module npu_top #(
                         gpl_capture_valid <= 1'b1;
                         gpl_capture_is_b  <= 1'b1;
                         gpl_capture_row   <= gpl_row;
-                        gpl_capture_word  <= gpl_b_word;
+                        gpl_capture_word  <= {4'd0, gpl_b_word};
                         if (gpl_state == GPL_LOAD_B3) begin
-                            if (gpl_row < 4'd15)
-                                gpl_row <= gpl_row + 4'd1;
+                            if (!gpl_load_last_k)
+                                gpl_row <= gpl_row + 8'd1;
                             else
-                                gpl_row <= 4'd0;
+                                gpl_row <= 8'd0;
                         end
                     end
                 end
@@ -725,27 +745,27 @@ module npu_top #(
                         gpl_capture_is_b  <= 1'b0;
                         gpl_capture_row   <= gpl_row;
                         gpl_capture_word  <= gpl_word;
-                        if (gpl_word == 2'd3) begin
-                            if (gpl_row < 4'd15)
-                                gpl_row <= gpl_row + 4'd1;
-                            gpl_word <= 2'd0;
+                        if (gpl_word == gpl_a_word_last) begin
+                            if (gpl_row < 8'd15)
+                                gpl_row <= gpl_row + 8'd1;
+                            gpl_word <= 6'd0;
                         end else begin
-                            gpl_word <= gpl_word + 2'd1;
+                            gpl_word <= gpl_word + 6'd1;
                         end
                     end
                 end
                 GPL_START: begin
                     gpl_gemm_start <= 1'b1;
                     gpl_feeding    <= 1'b1;
-                    gpl_feed_k     <= 4'd0;
+                    gpl_feed_k     <= 8'd0;
                     gpl_feed_phase <= 2'd0;
                 end
                 GPL_WAIT: begin
                     if (gemm_busy) begin
                         if (gpl_feed_phase < 2'd1)
                             gpl_feed_phase <= gpl_feed_phase + 2'd1;
-                        else if (gpl_feed_k < 4'd15)
-                            gpl_feed_k <= gpl_feed_k + 4'd1;
+                        else if (!gpl_feed_last_k)
+                            gpl_feed_k <= gpl_feed_k + 8'd1;
                     end
                     if (gemm_done)
                         gpl_feeding <= 1'b0;
@@ -767,12 +787,12 @@ module npu_top #(
             GPL_LOAD_B1: if (xbar_m1_grant)                gpl_next = GPL_LOAD_B2;
             GPL_LOAD_B2: if (xbar_m1_grant)                gpl_next = GPL_LOAD_B3;
             GPL_LOAD_B3: if (xbar_m1_grant) begin
-                              if (gpl_row == 4'd15)
+                              if (gpl_load_last_k)
                                   gpl_next = GPL_LOAD_A;
                               else
                                   gpl_next = GPL_LOAD_B0;
                           end
-            GPL_LOAD_A:  if (xbar_m1_grant && gpl_word == 2'd3 && gpl_row == 4'd15)
+            GPL_LOAD_A:  if (xbar_m1_grant && gpl_word == gpl_a_word_last && gpl_row == 8'd15)
                                                             gpl_next = GPL_START;
             GPL_START:                                     gpl_next = GPL_WAIT;
             GPL_WAIT:    if (gemm_done)                     gpl_next = GPL_IDLE;
@@ -944,14 +964,14 @@ module npu_top #(
     assign gemm_preload_busy = (gpl_state != GPL_IDLE);
 
     assign npu_busy = gemm_busy || valu_busy || sfu_busy || dma_busy ||
-                      bridge_busy || gemm_preload_busy;
+                      bridge_busy || gemm_preload_busy ||
+                      gemm_psum_valid || gemm_wb_active;
 
-    assign npu_going_idle = (gemm_busy && gemm_done)  ||
-                            (valu_busy && valu_done)  ||
+    assign npu_going_idle = (valu_busy && valu_done)  ||
                             (dma_busy  && dma_done)   ||
                             (sfu_busy  && sfu_valid_out) ||
                             (bridge_busy && dma_br_next == DMA_BR_IDLE) ||
-                            (gemm_preload_busy && gpl_next == GPL_IDLE);
+                            (gemm_wb_active && xbar_m2_grant && gemm_wb_cnt == 7'd127);
 
     // Debug signal pack (assigned here after all sub-signals are declared)
     assign debug_signals = {

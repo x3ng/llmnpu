@@ -44,6 +44,9 @@ DEBUG_GPL_STATE_SHIFT = 5
 DEBUG_GPL_STATE_MASK = 0x7 << DEBUG_GPL_STATE_SHIFT
 
 DSRAM_BASE = 0x3000
+ASRAM_BASE = 0x0000
+WSRAM_BASE = 0x1000
+OSRAM_BASE = 0x2000
 
 
 def ctrl_start(opcode):
@@ -103,6 +106,32 @@ def dsram_write_word(dut, byte_addr, value):
     """Write a 32-bit word directly into DSRAM for focused top-level tests."""
     word_idx = (byte_addr - DSRAM_BASE) >> 2
     dut.u_crossbar.u_dsram.mem[word_idx].value = value & 0xFFFFFFFF
+
+
+def _pack_word_i8(vals):
+    word = 0
+    for i, val in enumerate(vals):
+        word |= ((int(val) & 0xFF) << (8 * i))
+    return word
+
+
+def _sat16(val):
+    return max(-32768, min(32767, int(val)))
+
+
+def asram_write_word(dut, byte_addr, value):
+    word_idx = (byte_addr - ASRAM_BASE) >> 2
+    dut.u_crossbar.u_asram.mem[word_idx].value = value & 0xFFFFFFFF
+
+
+def wsram_write_word(dut, byte_addr, value):
+    word_idx = (byte_addr - WSRAM_BASE) >> 2
+    dut.u_crossbar.u_wsram.mem[word_idx].value = value & 0xFFFFFFFF
+
+
+def osram_read_word(dut, byte_addr):
+    word_idx = (byte_addr - OSRAM_BASE) >> 2
+    return int(dut.u_crossbar.u_osram.mem[word_idx].value) & 0xFFFFFFFF
 
 
 async def setup_dut(dut):
@@ -257,6 +286,81 @@ async def test_csr_gemm_fetches_descriptor(dut):
     assert int(dut.gpl_o_base.value) == 0x2000
 
     dut._log.info("PASS: CSR GEMM consumes DSRAM descriptor")
+
+
+@cocotb.test()
+async def test_csr_gemm_k2_computes_from_descriptor(dut):
+    """CSR GEMM with descriptor K=2 tiles computes a 16x16x32 product."""
+    await setup_dut(dut)
+
+    dut.rst_n.value = 1
+    await RisingEdge(dut.clk)
+    await Timer(1, unit="ps")
+
+    await csr_write(dut, CSR_CTRL, 0x00000002)
+    for i in range(4):
+        await if_load(dut, i, 0xFF000000)
+
+    k_count = 32
+    a_mat = [[((r * 3 + k * 5) % 9) - 4 for k in range(k_count)]
+             for r in range(16)]
+    b_mat = [[((k * 7 + c * 2) % 11) - 5 for c in range(16)]
+             for k in range(k_count)]
+
+    for r in range(16):
+        for w in range(k_count // 4):
+            vals = a_mat[r][w * 4:(w + 1) * 4]
+            asram_write_word(dut, ASRAM_BASE + r * k_count + w * 4,
+                             _pack_word_i8(vals))
+
+    for k in range(k_count):
+        for w in range(4):
+            vals = b_mat[k][w * 4:(w + 1) * 4]
+            wsram_write_word(dut, WSRAM_BASE + k * 16 + w * 4,
+                             _pack_word_i8(vals))
+
+    dsram_write_word(dut, DSRAM_BASE + 0, 0x00010001)  # M=1, N=1
+    dsram_write_word(dut, DSRAM_BASE + 4, 0x01000002)  # K=2, A=0, B=1
+    dsram_write_word(dut, DSRAM_BASE + 8, 0x00000002)  # O=2
+    dsram_write_word(dut, DSRAM_BASE + 12, 0x00000000)
+    dsram_write_word(dut, DSRAM_BASE + 16, 0x00000000)
+    await Timer(1, unit="ps")
+
+    await csr_write(dut, CSR_DESC_PTR, DSRAM_BASE)
+    await csr_write(dut, CSR_CTRL, 0x00000000)
+    await ClockCycles(dut.clk, 2)
+    await csr_write(dut, CSR_CTRL, ctrl_start(OP_GEMM))
+
+    busy_seen = False
+    idle_seen = False
+    for _ in range(1200):
+        await RisingEdge(dut.clk)
+        await Timer(1, unit="ps")
+        busy = (await csr_read(dut, CSR_STATUS)) & 1
+        if busy:
+            busy_seen = True
+        if busy_seen and not busy:
+            idle_seen = True
+            break
+
+    assert busy_seen, "K=2 CSR GEMM never went busy"
+    assert idle_seen, "K=2 CSR GEMM did not finish"
+
+    mismatches = []
+    for r in range(16):
+        for c in range(16):
+            word = osram_read_word(dut, OSRAM_BASE + r * 32 + (c // 2) * 4)
+            raw = (word >> (16 * (c & 1))) & 0xFFFF
+            got = raw if raw < 0x8000 else raw - 0x10000
+            exp = _sat16(sum(a_mat[r][k] * b_mat[k][c] for k in range(k_count)))
+            if got != exp:
+                mismatches.append((r, c, got, exp))
+
+    assert not mismatches, (
+        f"K=2 CSR GEMM mismatches: {mismatches[:8]} "
+        f"total={len(mismatches)}"
+    )
+    dut._log.info("PASS: CSR GEMM K=2 descriptor computes correct 16x16x32 result")
 
 
 @cocotb.test()

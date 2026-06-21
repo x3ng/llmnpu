@@ -37,7 +37,7 @@
 `define VOPT_OR   8'h06
 `define VOPT_XOR  8'h07
 
-// --- GEMM Descriptor (16 bytes, packed struct) ---
+// --- GEMM Descriptor (152 bits = 19 bytes, packed struct) ---
 typedef struct packed {
     logic [15:0] M, N, K;        // tile counts (each ×16)
     logic [7:0]  a_sram_bank;
