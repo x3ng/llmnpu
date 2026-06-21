@@ -11,7 +11,7 @@ Binary layout of a .npu file:
 | 8        | 4        | num_instr    uint32 LE                  |
 | 12       | 4        | num_desc     uint32 LE                  |
 | 16       | N*4      | instrs[]     NpuInstruction.encode()    |
-| 16+N*4   | M*16     | descs[]      gemm_desc_t (16 bytes)     |
+| 16+N*4   | M*19     | descs[]      gemm_desc_t (19 bytes)     |
 +──────────+──────────+────────────────────────────────────────+
 """
 
@@ -114,6 +114,9 @@ class NpuInstruction:
 
 # ── GEMM descriptor ──────────────────────────────────────────────────────
 
+GEMM_DESCRIPTOR_SIZE = 19
+
+
 def build_gemm_descriptor(
     m: int = 1,
     n: int = 16,
@@ -128,29 +131,29 @@ def build_gemm_descriptor(
     relu: int = 0,
     out_zp: int = 0,
 ) -> bytes:
-    """Build a 16-byte GEMM descriptor (packed little-endian).
+    """Build a 19-byte GEMM descriptor (packed little-endian).
 
-    Layout (16 bytes)::
+    Layout (19 bytes)::
 
-        [ 0] M              uint8   tile count (×16)
-        [ 1] N              uint8
-        [ 2] K              uint8
-        [ 3] a_sram_bank    uint8
-        [ 4] b_sram_bank    uint8
-        [ 5] o_sram_bank    uint8
-        [ 6] a_zp           uint8   INT8 zero point
-        [ 7] b_zp           uint8
-        [ 8] reserved       uint16
-        [10] out_scale_shr  uint16  requant right-shift
-        [12] out_scale_mul  int16   requant multiplier (signed)
-        [14] relu           uint8   fuse ReLU flag
-        [15] out_zp         uint8   output zero point
+        [ 0] M              uint16  tile count (×16)
+        [ 2] N              uint16
+        [ 4] K              uint16
+        [ 6] a_sram_bank    uint8
+        [ 7] b_sram_bank    uint8
+        [ 8] o_sram_bank    uint8
+        [ 9] a_zp           uint8   INT8 zero point
+        [10] b_zp           uint8
+        [11] reserved       uint16
+        [13] out_scale_shr  uint16  requant right-shift
+        [15] out_scale_mul  int16   requant multiplier (signed)
+        [17] relu           uint8   fuse ReLU flag
+        [18] out_zp         uint8   output zero point
     """
     return struct.pack(
-        "<BBBBBBBBHhhBB",
-        m & 0xFF,
-        n & 0xFF,
-        k & 0xFF,
+        "<HHHBBBBBHHhBB",
+        m & 0xFFFF,
+        n & 0xFFFF,
+        k & 0xFFFF,
         a_sram_bank & 0xFF,
         b_sram_bank & 0xFF,
         o_sram_bank & 0xFF,
@@ -158,7 +161,7 @@ def build_gemm_descriptor(
         b_zp & 0xFF,
         0,                      # reserved
         out_scale_shr & 0xFFFF,
-        out_scale_mul & 0xFFFF,
+        out_scale_mul,
         relu & 0xFF,
         out_zp & 0xFF,
     )
@@ -172,7 +175,7 @@ class NpuGraph:
 
     Attributes:
         instructions: Ordered list of ``NpuInstruction``.
-        descriptors:  Ordered list of 16-byte GEMM descriptor blobs.
+        descriptors:  Ordered list of 19-byte GEMM descriptor blobs.
     """
     instructions: list[NpuInstruction] = field(default_factory=list)
     descriptors: list[bytes] = field(default_factory=list)

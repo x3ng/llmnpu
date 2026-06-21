@@ -25,6 +25,12 @@ from .serialize import (
     build_gemm_descriptor,
 )
 
+TILE_DIM = 16
+
+
+def _ceil_div(a: int, b: int) -> int:
+    return (a + b - 1) // b
+
 
 class NpuCompiler:
     """Compile a traced ``torch.fx.GraphModule`` to an ``NpuGraph``."""
@@ -76,8 +82,8 @@ class NpuCompiler:
 
         desc = build_gemm_descriptor(
             m=1,                    # single-batch
-            n=out_features,
-            k=in_features,
+            n=_ceil_div(out_features, TILE_DIM),
+            k=_ceil_div(in_features, TILE_DIM),
             a_sram_bank=0,          # input activations
             b_sram_bank=1,          # weights
             o_sram_bank=0,          # output

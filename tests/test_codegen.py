@@ -19,6 +19,7 @@ from codegen.serialize import (          # noqa: E402
     NpuInstruction,
     Opcode,
     VOpt,
+    GEMM_DESCRIPTOR_SIZE,
     build_gemm_descriptor,
     serialize_to_binary,
 )
@@ -165,7 +166,7 @@ class TestSerialize:
     # -- GEMM descriptor --------------------------------------------------
     def test_build_gemm_descriptor_size(self):
         desc = build_gemm_descriptor()
-        assert len(desc) == 16
+        assert len(desc) == GEMM_DESCRIPTOR_SIZE
 
     def test_build_gemm_descriptor_fields(self):
         desc = build_gemm_descriptor(
@@ -175,25 +176,25 @@ class TestSerialize:
             out_scale_shr=4, out_scale_mul=100,
             relu=1, out_zp=5,
         )
-        m, n, k = struct.unpack_from("<BBB", desc, 0)
+        m, n, k = struct.unpack_from("<HHH", desc, 0)
         assert m == 2
         assert n == 32
         assert k == 64
 
-        a_bank, b_bank, o_bank = struct.unpack_from("<BBB", desc, 3)
+        a_bank, b_bank, o_bank = struct.unpack_from("<BBB", desc, 6)
         assert a_bank == 1
         assert b_bank == 2
         assert o_bank == 3
 
-        a_zp, b_zp = struct.unpack_from("<BB", desc, 6)
+        a_zp, b_zp = struct.unpack_from("<BB", desc, 9)
         assert a_zp == 10
         assert b_zp == 20
 
-        shr, mul = struct.unpack_from("<Hh", desc, 10)
+        shr, mul = struct.unpack_from("<Hh", desc, 13)
         assert shr == 4
         assert mul == 100
 
-        relu, out_zp = struct.unpack_from("<BB", desc, 14)
+        relu, out_zp = struct.unpack_from("<BB", desc, 17)
         assert relu == 1
         assert out_zp == 5
 
@@ -236,7 +237,7 @@ class TestSerialize:
             assert ver == 1
             assert ni == 2
             assert nd == 1
-            expected_size = 16 + 2 * 4 + 1 * 16
+            expected_size = 16 + 2 * 4 + 1 * GEMM_DESCRIPTOR_SIZE
             assert len(data) == expected_size
         finally:
             os.unlink(path)
@@ -279,7 +280,9 @@ class TestCompiler:
         assert graph.instructions[0].opcode == Opcode.GEMM
         assert graph.instructions[1].opcode == Opcode.ACT_RELU
         assert len(graph.descriptors) == 1
-        assert len(graph.descriptors[0]) == 16
+        assert len(graph.descriptors[0]) == GEMM_DESCRIPTOR_SIZE
+        m, n, k = struct.unpack_from("<HHH", graph.descriptors[0], 0)
+        assert (m, n, k) == (1, 1, 1)
 
     def test_compile_linear_gelu(self):
         torch = pytest.importorskip("torch")
@@ -299,6 +302,8 @@ class TestCompiler:
         assert len(graph.instructions) == 2
         assert graph.instructions[0].opcode == Opcode.GEMM
         assert graph.instructions[1].opcode == Opcode.ACT_GELU
+        m, n, k = struct.unpack_from("<HHH", graph.descriptors[0], 0)
+        assert (m, n, k) == (1, 1, 1)
 
     def test_compile_add(self):
         torch = pytest.importorskip("torch")
@@ -393,5 +398,48 @@ class TestCompiler:
             assert ver == 1
             assert ni == 2       # GEMM + ACT_RELU
             assert nd == 1       # one GEMM descriptor
+        finally:
+            os.unlink(path)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  PyTorch-like public entry point
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestNpuTorch:
+    """Minimal PyTorch-facing compile_model API."""
+
+    def test_compile_model_writes_linear_relu_npu(self):
+        torch = pytest.importorskip("torch")
+        import torch.nn as nn
+        from codegen.npu_torch import compile_model
+
+        class Model(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.linear = nn.Linear(16, 16)
+            def forward(self, x):
+                return torch.relu(self.linear(x))
+
+        with tempfile.NamedTemporaryFile(suffix=".npu", delete=False) as f:
+            path = f.name
+        try:
+            result = compile_model(Model(), torch.randn(1, 16), path)
+
+            assert os.fspath(result.out_path) == path
+            assert result.input_shape == (1, 16)
+            assert result.num_instructions == 2
+            assert result.num_descriptors == 1
+            assert result.graph.instructions[0].opcode == Opcode.GEMM
+            assert result.graph.instructions[1].opcode == Opcode.ACT_RELU
+
+            with open(path, "rb") as fh:
+                data = fh.read()
+            assert data[:4] == MAGIC
+            ver, ni, nd = struct.unpack("<III", data[4:16])
+            assert ver == 1
+            assert ni == 2
+            assert nd == 1
+            assert len(data) == 16 + 2 * 4 + 1 * GEMM_DESCRIPTOR_SIZE
         finally:
             os.unlink(path)
