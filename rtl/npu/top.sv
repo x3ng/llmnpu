@@ -118,6 +118,10 @@ module npu_top #(
     // ================================================================
     logic npu_busy;
     logic npu_going_idle;
+    logic perf_gemm_busy;
+    logic perf_valu_busy;
+    logic perf_sfu_busy;
+    logic perf_dma_busy;
 
     // ================================================================
     // Debug signal pack for CSR DEBUG register (0x60)
@@ -137,6 +141,11 @@ module npu_top #(
         .npu_going_idle  (npu_going_idle),
         .dma_err_event   (dma_error),
         .ill_insn_event  (illegal_cmd_valid),
+        .perf_busy       (npu_busy),
+        .perf_gemm_busy  (perf_gemm_busy),
+        .perf_valu_busy  (perf_valu_busy),
+        .perf_sfu_busy   (perf_sfu_busy),
+        .perf_dma_busy   (perf_dma_busy),
         .current_pc      (if_current_pc),
         .debug_signals   (debug_signals),
         .npu_start       (csr_start),
@@ -1131,6 +1140,11 @@ module npu_top #(
     assign npu_busy = gemm_busy || valu_busy || sfu_busy || dma_busy ||
                       bridge_busy || dma_load_inflight || gemm_preload_busy ||
                       gemm_psum_valid || gemm_wb_active;
+    assign perf_gemm_busy = gemm_busy || gemm_preload_busy ||
+                            gemm_psum_valid || gemm_wb_active;
+    assign perf_valu_busy = valu_busy;
+    assign perf_sfu_busy  = sfu_busy;
+    assign perf_dma_busy  = dma_busy || bridge_busy || dma_load_inflight;
 
     assign npu_going_idle = (valu_busy && valu_done)  ||
                             (dma_busy  && dma_done)   ||

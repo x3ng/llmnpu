@@ -19,6 +19,11 @@ module csr (
     input  logic        npu_going_idle,
     input  logic        dma_err_event,
     input  logic        ill_insn_event,
+    input  logic        perf_busy,
+    input  logic        perf_gemm_busy,
+    input  logic        perf_valu_busy,
+    input  logic        perf_sfu_busy,
+    input  logic        perf_dma_busy,
     input  logic [7:0]  current_pc,
 
     // Debug signals (exposed read-only via DEBUG register)
@@ -66,6 +71,11 @@ module csr (
     localparam logic [9:0] A_IRQ_EN    = 10'h10;
     localparam logic [9:0] A_IRQ_STAT  = 10'h11;
     localparam logic [9:0] A_PERF_CYC  = 10'h20;
+    localparam logic [9:0] A_PERF_BUSY = 10'h21;
+    localparam logic [9:0] A_PERF_GEMM = 10'h22;
+    localparam logic [9:0] A_PERF_VALU = 10'h23;
+    localparam logic [9:0] A_PERF_SFU  = 10'h24;
+    localparam logic [9:0] A_PERF_DMA  = 10'h25;
     localparam logic [9:0] A_DEBUG     = 10'h18;   // byte 0x60
 
     // ----------------------------------------------------------------
@@ -78,6 +88,11 @@ module csr (
     logic [31:0] irq_en_reg;
     logic [31:0] irq_stat_reg;
     logic [31:0] perf_cycle_reg;
+    logic [31:0] perf_busy_reg;
+    logic [31:0] perf_gemm_reg;
+    logic [31:0] perf_valu_reg;
+    logic [31:0] perf_sfu_reg;
+    logic [31:0] perf_dma_reg;
 
     wire [9:0] waddr = addr[11:2];
 
@@ -95,9 +110,25 @@ module csr (
             irq_en_reg     <= 32'd0;
             irq_stat_reg   <= 32'd0;
             perf_cycle_reg <= 32'd0;
+            perf_busy_reg  <= 32'd0;
+            perf_gemm_reg  <= 32'd0;
+            perf_valu_reg  <= 32'd0;
+            perf_sfu_reg   <= 32'd0;
+            perf_dma_reg   <= 32'd0;
         end else begin
-            // Free-running performance cycle counter
+            // Performance counters.  Writes below can seed or clear any
+            // counter; otherwise active sources increment once per cycle.
             perf_cycle_reg <= perf_cycle_reg + 32'd1;
+            if (perf_busy)
+                perf_busy_reg <= perf_busy_reg + 32'd1;
+            if (perf_gemm_busy)
+                perf_gemm_reg <= perf_gemm_reg + 32'd1;
+            if (perf_valu_busy)
+                perf_valu_reg <= perf_valu_reg + 32'd1;
+            if (perf_sfu_busy)
+                perf_sfu_reg <= perf_sfu_reg + 32'd1;
+            if (perf_dma_busy)
+                perf_dma_reg <= perf_dma_reg + 32'd1;
 
             // irq_stat[0] set when any busy engine is about to go idle
             // (npu_going_idle pulses one cycle before busy falls)
@@ -118,6 +149,12 @@ module csr (
                     A_DMA_CSR3:  dma_csr3     <= wdata;
                     A_IRQ_EN:    irq_en_reg   <= wdata;
                     A_IRQ_STAT:  irq_stat_reg <= irq_stat_reg & ~wdata;  // W1C
+                    A_PERF_CYC:  perf_cycle_reg <= wdata;
+                    A_PERF_BUSY: perf_busy_reg  <= wdata;
+                    A_PERF_GEMM: perf_gemm_reg  <= wdata;
+                    A_PERF_VALU: perf_valu_reg  <= wdata;
+                    A_PERF_SFU:  perf_sfu_reg   <= wdata;
+                    A_PERF_DMA:  perf_dma_reg   <= wdata;
                     default: ;
                 endcase
             end
@@ -141,6 +178,11 @@ module csr (
             A_IRQ_EN:    rdata = irq_en_reg;
             A_IRQ_STAT:  rdata = irq_stat_reg;
             A_PERF_CYC:  rdata = perf_cycle_reg;
+            A_PERF_BUSY: rdata = perf_busy_reg;
+            A_PERF_GEMM: rdata = perf_gemm_reg;
+            A_PERF_VALU: rdata = perf_valu_reg;
+            A_PERF_SFU:  rdata = perf_sfu_reg;
+            A_PERF_DMA:  rdata = perf_dma_reg;
             A_DEBUG:     rdata = debug_signals;
             default:     rdata = 32'd0;
         endcase

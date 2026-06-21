@@ -24,6 +24,11 @@
 #define CSR_IRQ_EN       0x40
 #define CSR_IRQ_STAT     0x44
 #define CSR_PERF_CYCLE   0x80
+#define CSR_PERF_BUSY    0x84
+#define CSR_PERF_GEMM    0x88
+#define CSR_PERF_VALU    0x8C
+#define CSR_PERF_SFU     0x90
+#define CSR_PERF_DMA     0x94
 
 // --- CSR_CTRL bits ---
 #define CSR_CTRL_START    (1u << 0)

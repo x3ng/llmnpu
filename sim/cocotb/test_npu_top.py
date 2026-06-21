@@ -40,6 +40,11 @@ CSR_IRQ_EN    = 0x10
 CSR_IRQ_STAT  = 0x11
 CSR_DEBUG     = 0x18
 CSR_PERF_CYC  = 0x20
+CSR_PERF_BUSY = 0x21
+CSR_PERF_GEMM = 0x22
+CSR_PERF_VALU = 0x23
+CSR_PERF_SFU  = 0x24
+CSR_PERF_DMA  = 0x25
 
 OP_GEMM       = 0x01
 OP_VADD       = 0x10
@@ -224,6 +229,68 @@ async def test_csr_rw(dut):
     assert pc2 > pc1, f"PERF_CYCLE not incrementing: {pc1} -> {pc2}"
 
     dut._log.info(f"PASS: CSR R/W — PERF_CYCLE {pc1} → {pc2}")
+
+
+@cocotb.test()
+async def test_perf_counters_track_valu_busy(dut):
+    """Performance counters track aggregate and per-engine busy cycles."""
+    await setup_dut(dut)
+
+    dut.rst_n.value = 1
+    await RisingEdge(dut.clk)
+    await Timer(1, unit="ps")
+
+    perf_regs = [
+        CSR_PERF_CYC,
+        CSR_PERF_BUSY,
+        CSR_PERF_GEMM,
+        CSR_PERF_VALU,
+        CSR_PERF_SFU,
+        CSR_PERF_DMA,
+    ]
+    for reg in perf_regs:
+        await csr_write(dut, reg, 0)
+
+    vadd_instr = (OP_VADD << 24) | (0x00 << 20) | (1 << 16) | (2 << 8) | 3
+    await csr_write(dut, CSR_CTRL, CSR_CTRL_RESET)
+    await if_load(dut, 0, vadd_instr)
+    await if_load(dut, 1, (OP_WFI << 24))
+    await valu_write_reg(dut, 2, [3] * 64)
+    await valu_write_reg(dut, 3, [4] * 64)
+    await csr_write(dut, CSR_CTRL, CSR_CTRL_START)
+
+    busy_seen = False
+    for _ in range(80):
+        await RisingEdge(dut.clk)
+        await Timer(1, unit="ps")
+        status = await csr_read(dut, CSR_STATUS)
+        if status & 1:
+            busy_seen = True
+        if busy_seen and not (status & 1):
+            break
+
+    assert busy_seen, "VALU command never made NPU busy"
+
+    cycle_count = await csr_read(dut, CSR_PERF_CYC)
+    busy_count = await csr_read(dut, CSR_PERF_BUSY)
+    gemm_count = await csr_read(dut, CSR_PERF_GEMM)
+    valu_count = await csr_read(dut, CSR_PERF_VALU)
+    sfu_count = await csr_read(dut, CSR_PERF_SFU)
+    dma_count = await csr_read(dut, CSR_PERF_DMA)
+
+    assert cycle_count > 0, "PERF_CYCLE did not increment"
+    assert busy_count > 0, "PERF_BUSY did not count VALU activity"
+    assert valu_count > 0, "PERF_VALU did not count VALU activity"
+    assert gemm_count == 0, f"PERF_GEMM changed during VALU-only op: {gemm_count}"
+    assert sfu_count == 0, f"PERF_SFU changed during VALU-only op: {sfu_count}"
+    assert dma_count == 0, f"PERF_DMA changed during VALU-only op: {dma_count}"
+
+    await csr_write(dut, CSR_PERF_VALU, 0)
+    assert await csr_read(dut, CSR_PERF_VALU) == 0, "PERF_VALU write-clear failed"
+
+    dut._log.info(
+        f"PASS: perf counters cycle={cycle_count} busy={busy_count} valu={valu_count}"
+    )
 
 
 @cocotb.test()
