@@ -13,12 +13,17 @@ static int8_t B[TILE * TILE] __attribute__((aligned(8)));
 static int16_t C[TILE * TILE] __attribute__((aligned(8)));
 
 static const uint8_t program_image[] __attribute__((aligned(8))) = {
-    // Header: magic "NPUC", version=1, num_instr=2, num_desc=1
+    // Header: magic "NPUC", version=1, num_instr=6, num_desc=1
     0x4e, 0x50, 0x55, 0x43,
     0x01, 0x00, 0x00, 0x00,
-    0x02, 0x00, 0x00, 0x00,
+    0x06, 0x00, 0x00, 0x00,
     0x01, 0x00, 0x00, 0x00,
 
+    // Four NOPs force IF/ID execution past the legacy 4-word imem limit.
+    0x00, 0x00, 0x00, 0xff,
+    0x00, 0x00, 0x00, 0xff,
+    0x00, 0x00, 0x00, 0xff,
+    0x00, 0x00, 0x00, 0xff,
     // Instruction: OP_GEMM, desc_ref_words=0, aux=0
     0x00, 0x00, 0x00, 0x01,
     // Instruction: OP_WFI, halt IF/ID after issuing GEMM

@@ -65,7 +65,7 @@
 
 #define NPU_PROGRAM_MAGIC   0x4355504Eu  // "NPUC" little-endian
 #define NPU_PROGRAM_VERSION 1u
-#define NPU_MAX_IFID_INSTR  4u
+#define NPU_MAX_IFID_INSTR  32u
 #define NPU_DESC_SLOT_SIZE  20u
 
 #endif // NPU_CSR_H

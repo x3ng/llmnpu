@@ -13,7 +13,10 @@ module if_id_top (
     output logic [31:0] debug_imem0
 );
 
-    reg [31:0] imem0, imem1, imem2, imem3;
+    localparam int IMEM_WORDS = 256;
+
+    reg [31:0] imem [0:IMEM_WORDS-1];
+    wire [31:0] imem0 = imem[0];
     assign debug_imem0 = imem0;
 
     reg [7:0] pc;
@@ -22,12 +25,7 @@ module if_id_top (
     reg id_valid;
     reg halted;
 
-    // Combinational fetch: pure mux via continuous assignment.
-    wire [31:0] fetch_instr = (pc == 8'd0) ? imem0 :
-                               (pc == 8'd1) ? imem1 :
-                               (pc == 8'd2) ? imem2 :
-                               (pc == 8'd3) ? imem3 :
-                               32'd0;
+    wire [31:0] fetch_instr = imem[pc];
 
     wire [7:0]  opcode   = id_instr[31:24];
     wire target_gemm = (opcode == 8'h01) || (opcode == 8'h02);
@@ -52,13 +50,7 @@ module if_id_top (
     always @(posedge clk) begin
         // ---- Instruction memory write: always, even during reset ----
         if (mem_we) begin
-            case (mem_addr)
-                8'd0: imem0 <= mem_wdata;
-                8'd1: imem1 <= mem_wdata;
-                8'd2: imem2 <= mem_wdata;
-                8'd3: imem3 <= mem_wdata;
-                default: ;
-            endcase
+            imem[mem_addr] <= mem_wdata;
         end
 
         // ---- Synchronous reset / pipeline advance ----

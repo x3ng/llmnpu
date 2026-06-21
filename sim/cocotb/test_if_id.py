@@ -195,6 +195,38 @@ async def test_dispatch_routing(dut):
 
 
 @cocotb.test()
+async def test_dispatch_past_four_word_boundary(dut):
+    """IF/ID fetches and dispatches instructions beyond address 3."""
+    await setup_reset(dut)
+
+    await load_instrs(dut, [
+        NOP,
+        NOP,
+        NOP,
+        NOP,
+        0x01020304,  # GEMM at imem[4]
+    ])
+
+    dut.rst_n.value = 1
+    await Timer(1, unit='ns')
+
+    for cycle in range(1, 7):
+        await RisingEdge(dut.clk)
+        await ReadOnly()
+        if cycle < 6:
+            assert not int(dut.gemm_cmd_valid.value), \
+                f"GEMM dispatched too early at cycle {cycle}"
+        else:
+            assert int(dut.gemm_cmd_valid.value), \
+                "GEMM at imem[4] did not dispatch"
+            assert int(dut.gemm_cmd.value) == 0x01020304, \
+                f"gemm_cmd=0x{int(dut.gemm_cmd.value):08X}"
+        await Timer(1, unit='ns')
+
+    dut._log.info("PASS: IF/ID dispatches instruction beyond imem[3]")
+
+
+@cocotb.test()
 async def test_sync_stall(dut):
     """Test 4: SYNC instruction asserts stall_if when units report busy.
 
