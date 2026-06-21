@@ -700,6 +700,42 @@ async def test_ifid_dma_store_prefills_dma_sram(dut):
 
 
 @cocotb.test()
+async def test_dma_invalid_length_sets_fault_irq(dut):
+    """Invalid DMA command raises IRQ_STAT[1] and does not leave NPU busy."""
+    await setup_dut(dut)
+
+    dut.rst_n.value = 1
+    await RisingEdge(dut.clk)
+    await Timer(1, unit="ps")
+
+    await csr_write(dut, CSR_CTRL, CSR_CTRL_RESET)
+    await csr_write(dut, CSR_IRQ_EN, IRQ_FAULT)
+    await csr_write(dut, CSR_IRQ_STAT, 0xFFFFFFFF)
+    await csr_write(dut, CSR_CTRL, 0)
+
+    await csr_write(dut, CSR_DMA_CSR0, 0x00000100)
+    await csr_write(dut, CSR_DMA_CSR1, ASRAM_BASE)
+    await csr_write(dut, CSR_DMA_CSR2, 6)
+    await csr_write(dut, CSR_DMA_CSR3, DMA_CSR3_START)
+
+    fault_seen = False
+    for _ in range(12):
+        await RisingEdge(dut.clk)
+        await Timer(1, unit="ps")
+        irq_stat = await csr_read(dut, CSR_IRQ_STAT)
+        if irq_stat & IRQ_FAULT:
+            fault_seen = True
+            break
+
+    assert fault_seen, "invalid DMA length did not set IRQ_STAT[1]"
+    assert int(dut.irq.value) == 1, "invalid DMA fault IRQ output did not assert"
+
+    status = await csr_read(dut, CSR_STATUS)
+    assert (status & 1) == 0, f"invalid DMA left NPU busy: status=0x{status:08X}"
+    dut._log.info("PASS: invalid DMA length raises fault IRQ")
+
+
+@cocotb.test()
 async def test_illegal_instruction_sets_fault_irq(dut):
     """Unknown IF/ID opcode raises IRQ_STAT[1] fault."""
     await setup_dut(dut)

@@ -94,6 +94,7 @@ module npu_top #(
     logic [7:0]  csr_pc_wdata;
     logic [7:0]  if_current_pc;
     logic        illegal_cmd_valid;
+    logic        dma_error;
 
     // ================================================================
     // Running flag
@@ -134,7 +135,7 @@ module npu_top #(
         .rdata           (csr_rdata),
         .npu_busy        (npu_busy),
         .npu_going_idle  (npu_going_idle),
-        .fault_event     (illegal_cmd_valid),
+        .fault_event     (illegal_cmd_valid || dma_error),
         .current_pc      (if_current_pc),
         .debug_signals   (debug_signals),
         .npu_start       (csr_start),
@@ -385,6 +386,8 @@ module npu_top #(
     always_ff @(posedge clk or negedge dp_rst_n) begin
         if (!dp_rst_n)
             dma_load_inflight <= 1'b0;
+        else if (dma_error)
+            dma_load_inflight <= 1'b0;
         else if ((csr_dma_start && !csr_dma_is_store) ||
                  (dma_cmd_valid && (dma_cmd[31:24] != `OP_DMA_ST)))
             dma_load_inflight <= 1'b1;
@@ -420,6 +423,7 @@ module npu_top #(
         .sram_stride   (csr_dma_sram_stride),
         .busy          (dma_busy),
         .done          (dma_done),
+        .error         (dma_error),
         .pp_bank       (),
         .pp_ready      (),
 

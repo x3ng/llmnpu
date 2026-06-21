@@ -36,6 +36,7 @@ module npu_dma #(
     // Status
     output logic        busy,
     output logic        done,
+    output logic        error,
 
     // Ping-pong buffer coordination
     output logic        pp_bank,
@@ -141,6 +142,13 @@ module npu_dma #(
     logic [31:0] cur_sram_base;
     logic [31:0] cur_ext_addr;
     logic [15:0] cur_sram_addr;
+    logic        cmd_is_valid_opcode;
+    logic        cmd_is_2d;
+    logic [15:0] cmd_rows;
+    logic [15:0] cmd_row_bytes;
+    logic [15:0] cmd_sram_stride;
+    logic [31:0] cmd_last_sram_byte;
+    logic        cmd_invalid;
 
     always_comb begin
         cur_sram_base = {16'd0, r_sram_addr}
@@ -148,6 +156,31 @@ module npu_dma #(
         cur_ext_addr  = r_ext_addr
                       + ({16'd0, row_idx} * {16'd0, r_ext_stride});
         cur_sram_addr = cur_sram_base[15:0] + xfer_cnt;
+    end
+
+    always_comb begin
+        cmd_is_valid_opcode = (opcode == `OP_DMA_LD) ||
+                              (opcode == `OP_DMA_ST) ||
+                              (opcode == `OP_DMA_2D);
+        cmd_is_2d = (opcode == `OP_DMA_2D) ||
+                    ((opcode == `OP_DMA_ST) &&
+                     (row_count != 16'd0) && (row_bytes != 16'd0));
+        cmd_rows = cmd_is_2d ? ((row_count == 16'd0) ? 16'd1 : row_count) :
+                               16'd1;
+        cmd_row_bytes = cmd_is_2d ? row_bytes : length;
+        cmd_sram_stride = cmd_is_2d ? ((sram_stride == 16'd0) ? row_bytes :
+                                                             sram_stride) :
+                                      length;
+        cmd_last_sram_byte = {16'd0, sram_addr}
+                           + ({16'd0, cmd_rows - 16'd1} *
+                              {16'd0, cmd_sram_stride})
+                           + {16'd0, cmd_row_bytes}
+                           - 32'd1;
+        cmd_invalid = !cmd_is_valid_opcode ||
+                      (cmd_row_bytes == 16'd0) ||
+                      (cmd_row_bytes[2:0] != 3'd0) ||
+                      (cmd_sram_stride < cmd_row_bytes) ||
+                      (cmd_last_sram_byte > 32'h0000_FFFF);
     end
 
     // wr_data driven combinationally from sram — avoids NBA race
@@ -237,6 +270,7 @@ module npu_dma #(
         if (!rst_n) begin
             state         <= S_IDLE;
             done          <= 1'b0;
+            error         <= 1'b0;
             wrapper_start <= 1'b0;
             r_mode        <= 2'd0;
             r_ext_addr    <= 32'd0;
@@ -253,8 +287,11 @@ module npu_dma #(
             case (state)
                 S_IDLE: begin
                     done          <= 1'b0;
+                    error         <= 1'b0;
                     wrapper_start <= 1'b0;
-                    if (start) begin
+                    if (start && cmd_invalid) begin
+                        error <= 1'b1;
+                    end else if (start) begin
                         r_ext_addr  <= ext_addr;
                         r_sram_addr <= sram_addr;
                         row_idx     <= 16'd0;
@@ -351,7 +388,7 @@ module npu_dma #(
     always_comb begin
         next = state;
         case (state)
-            S_IDLE: if (start) next = S_ROW_START;
+            S_IDLE: if (start && !cmd_invalid) next = S_ROW_START;
             S_ROW_START: next = S_XFER;
             S_XFER: begin
                 if (wrapper_done) begin

@@ -8,13 +8,33 @@ Test scenarios:
 
 import cocotb
 from cocotb.clock import Clock
-from cocotb.triggers import ClockCycles, RisingEdge
+from cocotb.triggers import ClockCycles, RisingEdge, Timer
 import random
 
 # Opcodes matching isa_defines.svh
 OP_DMA_LD = 0x40
 OP_DMA_ST = 0x41
 OP_DMA_2D = 0x42
+
+
+def init_inputs(dut):
+    dut.start.value = 0
+    dut.opcode.value = 0
+    dut.ext_addr.value = 0
+    dut.sram_addr.value = 0
+    dut.length.value = 0
+    dut.row_count.value = 0
+    dut.row_bytes.value = 0
+    dut.ext_stride.value = 0
+    dut.sram_stride.value = 0
+    dut.sim_ext_en.value = 0
+    dut.sim_ext_we.value = 0
+    dut.sim_ext_addr.value = 0
+    dut.sim_ext_wdata.value = 0
+    dut.sim_sram_en.value = 0
+    dut.sim_sram_we.value = 0
+    dut.sim_sram_addr.value = 0
+    dut.sim_sram_wdata.value = 0
 
 
 async def reset_dut(dut):
@@ -115,6 +135,33 @@ async def start_dma(dut, opcode, ext_addr, sram_addr, length,
 # ===========================================================================
 # Test 1: 1D DMA LOAD — ExtMem → SRAM
 # ===========================================================================
+@cocotb.test()
+async def test_dma_rejects_unaligned_length(dut):
+    """DMA rejects non-8-byte-aligned row lengths with an error pulse."""
+    clock = Clock(dut.clk, 2, unit="ns")
+    cocotb.start_soon(clock.start())
+
+    init_inputs(dut)
+    await reset_dut(dut)
+
+    dut.start.value = 1
+    dut.opcode.value = OP_DMA_LD
+    dut.ext_addr.value = 0x100
+    dut.sram_addr.value = 0x200
+    dut.length.value = 6
+    await RisingEdge(dut.clk)
+    await Timer(1, unit="ps")
+    assert int(dut.error.value), "unaligned DMA length did not raise error"
+    assert not int(dut.busy.value), "invalid DMA command should not enter busy state"
+    assert not int(dut.done.value), "invalid DMA command should not assert done"
+    dut.start.value = 0
+
+    await RisingEdge(dut.clk)
+    await Timer(1, unit="ps")
+    assert not int(dut.error.value), "DMA error should be a one-cycle pulse"
+    dut._log.info("PASS: DMA rejects non-8-byte-aligned length")
+
+
 @cocotb.test()
 async def test_dma_1d_load(dut):
     """Write 8 words to ExtMem, DMA LOAD them into SRAM, verify."""
