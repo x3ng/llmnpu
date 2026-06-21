@@ -50,6 +50,7 @@ OP_GEMM       = 0x01
 OP_VADD       = 0x10
 OP_ACT_RELU   = 0x20
 OP_QUANT      = 0x30
+OP_DMA_LD     = 0x40
 OP_DMA_ST     = 0x41
 OP_SYNC       = 0xF0
 OP_WFI        = 0xF1
@@ -147,18 +148,24 @@ async def start_dma_store_and_collect_prefill_addrs(dut, ext_addr, sram_addr,
     await csr_write(dut, CSR_DMA_CSR3, DMA_CSR3_DIR_ST | DMA_CSR3_START)
 
     busy_seen = False
+    dma_done_seen = False
     prefill_addrs = []
     for _ in range(timeout_cycles):
         await RisingEdge(dut.clk)
         await Timer(1, unit="ps")
         if int(dut.m0_req.value) and int(dut.xbar_m0_grant.value) and not int(dut.m0_wen.value):
             prefill_addrs.append(int(dut.m0_addr.value) & 0xFFFF)
+        if prefill_addrs and int(dut.dma_done.value):
+            dma_done_seen = True
         busy = (await csr_read(dut, CSR_STATUS)) & 1
         if busy:
             busy_seen = True
-        if busy_seen and not busy:
+        if busy_seen and dma_done_seen and not busy:
             return prefill_addrs
-    raise AssertionError("DMA STORE did not assert busy and return idle")
+    raise AssertionError(
+        f"DMA STORE did not complete: busy_seen={busy_seen} "
+        f"dma_done_seen={dma_done_seen} prefill_words={len(prefill_addrs)}"
+    )
 
 
 async def wait_gemm_idle_after_busy(dut, timeout_cycles=2000):
@@ -282,6 +289,27 @@ def osram_read_word(dut, byte_addr):
 def osram_write_word(dut, byte_addr, value):
     word_idx = (byte_addr - OSRAM_BASE) >> 2
     dut.u_crossbar.u_osram.mem[word_idx].value = value & 0xFFFFFFFF
+
+
+def dma_ext_write_byte(dut, byte_addr, value):
+    dut.u_dma.wrapper.axi_ram[byte_addr].value = value & 0xFF
+
+
+def dma_ext_read_byte(dut, byte_addr):
+    return int(dut.u_dma.wrapper.axi_ram[byte_addr].value) & 0xFF
+
+
+def dma_ext_write_i8_tile(dut, byte_addr, matrix):
+    for r in range(16):
+        for c in range(16):
+            dma_ext_write_byte(dut, byte_addr + r * 16 + c, matrix[r][c])
+
+
+def dma_ext_read_word(dut, byte_addr):
+    result = 0
+    for i in range(4):
+        result |= dma_ext_read_byte(dut, byte_addr + i) << (8 * i)
+    return result
 
 
 def write_gemm_constant_tile(dut, a_base, b_base, a_value, b_value):
@@ -1047,6 +1075,79 @@ async def test_gemm_p_pingpong_writeback_and_dma_store_use_active_bank(dut):
     )
 
     dut._log.info("PASS: GEMM P ping-pong writeback and STORE use active bank")
+
+
+@cocotb.test()
+async def test_tile_flow_dma_load_gemm_dma_store_result(dut):
+    """NPU tile flow: DMA LOAD A/B, GEMM, DMA STORE P, verify output."""
+    await setup_dut(dut)
+
+    dut.rst_n.value = 1
+    await RisingEdge(dut.clk)
+    await Timer(1, unit="ps")
+
+    await csr_write(dut, CSR_CTRL, CSR_CTRL_RESET)
+    for i in range(4):
+        await if_load(dut, i, (OP_WFI << 24))
+    await csr_write(dut, CSR_CTRL, 0)
+    await ClockCycles(dut.clk, 2)
+
+    a_ext = 0x00004000
+    b_ext = 0x00005000
+    c_ext = 0x00006000
+    a_mat = [[1 for _ in range(16)] for _ in range(16)]
+    b_mat = [[1 for _ in range(16)] for _ in range(16)]
+    dma_ext_write_i8_tile(dut, a_ext, a_mat)
+    dma_ext_write_i8_tile(dut, b_ext, b_mat)
+    await Timer(1, unit="ps")
+
+    a_addrs = await start_dma_load_and_collect_copy_addrs(
+        dut, a_ext, ASRAM_BASE, 256, timeout_cycles=2000)
+    b_addrs = await start_dma_load_and_collect_copy_addrs(
+        dut, b_ext, WSRAM_BASE, 256, timeout_cycles=2000)
+    assert a_addrs[0] == ASRAM_BASE and a_addrs[-1] == ASRAM_BASE + 252, (
+        f"A LOAD copy window mismatch: first/last={a_addrs[:1]}/{a_addrs[-1:]}"
+    )
+    assert b_addrs[0] == WSRAM_BASE and b_addrs[-1] == WSRAM_BASE + 252, (
+        f"B LOAD copy window mismatch: first/last={b_addrs[:1]}/{b_addrs[-1:]}"
+    )
+
+    dsram_write_word(dut, DSRAM_BASE + 0, 0x00010001)
+    dsram_write_word(dut, DSRAM_BASE + 4, 0x01000001)
+    dsram_write_word(dut, DSRAM_BASE + 8, 0x00000002)
+    dsram_write_word(dut, DSRAM_BASE + 12, 0x01000000)
+    dsram_write_word(dut, DSRAM_BASE + 16, 0x00000000)
+    await Timer(1, unit="ps")
+
+    await csr_write(dut, CSR_DESC_PTR, DSRAM_BASE)
+    await csr_write(dut, CSR_CTRL, ctrl_start(OP_GEMM))
+    await wait_gemm_idle_after_busy(dut, timeout_cycles=2200)
+
+    store_addrs = await start_dma_store_and_collect_prefill_addrs(
+        dut, c_ext, OSRAM_BASE, 512, timeout_cycles=2200)
+    assert store_addrs[0] == OSRAM_BASE and store_addrs[-1] == OSRAM_BASE + 508, (
+        f"STORE prefill window mismatch: first/last={store_addrs[:1]}/{store_addrs[-1:]}"
+    )
+    staging_word = dma_sram_read_word(dut, OSRAM_BASE)
+    assert staging_word == 0x00100010, (
+        f"STORE staging SRAM word expected 0x00100010, got 0x{staging_word:08X}"
+    )
+    await ClockCycles(dut.clk, 4)
+
+    mismatches = []
+    for r in range(16):
+        for c in range(16):
+            byte_addr = c_ext + r * 32 + (c // 2) * 4
+            word = dma_ext_read_word(dut, byte_addr)
+            raw = (word >> (16 * (c & 1))) & 0xFFFF
+            got = raw if raw < 0x8000 else raw - 0x10000
+            if got != 16:
+                mismatches.append((r, c, got))
+
+    assert not mismatches, (
+        f"tile flow output mismatches: {mismatches[:8]} total={len(mismatches)}"
+    )
+    dut._log.info("PASS: tile flow DMA LOAD -> GEMM -> DMA STORE result")
 
 
 @cocotb.test()
