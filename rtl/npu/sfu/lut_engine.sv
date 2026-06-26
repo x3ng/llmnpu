@@ -18,9 +18,9 @@
 // ============================================================
 
 module lut_engine #(
-    parameter string GELU_FILE    = "../synth/luts/gelu.hex",
-    parameter string SIGMOID_FILE = "../synth/luts/sigmoid.hex",
-    parameter string TANH_FILE    = "../synth/luts/tanh.hex"
+    parameter GELU_FILE    = "../synth/luts/gelu.hex",
+    parameter SIGMOID_FILE = "../synth/luts/sigmoid.hex",
+    parameter TANH_FILE    = "../synth/luts/tanh.hex"
 ) (
     input  logic        clk,
     input  logic        rst_n,
