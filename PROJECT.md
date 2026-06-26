@@ -53,11 +53,11 @@
 - [x] 6.1 E2E DMA / driver contract (PASS)
 - [x] 6.1 E2E GEMM / runtime contract (PASS)
 - [x] 6.1 Generated `.npu` program through RTL IF/ID (PASS)
-- [ ] 6.2 Yosys synthesis (area/timing estimates; deferred)
+- [x] 6.2 Yosys synthesis — 14 modules, ~721K cells total (remote server, Yosys 0.62)
 
 ### Phase 7 — Polish
 - [x] 7.1 Functional closure report
-- [ ] 7.2 Performance report / synthesis (deferred)
+- [x] 7.2 Synthesis report — area estimates per module, generic library (docs/synthesis_report.md)
 
 ## Quick Reference
 
